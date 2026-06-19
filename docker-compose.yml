@@ -1,0 +1,19 @@
+services:
+  vantara-kernel-builder:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: vantara-kernel-builder
+    working_dir: /workspace
+    ports:
+     - "5900:5900"
+    volumes:
+      - .:/workspace
+      - cargo-registry:/usr/local/cargo/registry
+      - cargo-git:/usr/local/cargo/git
+    tty: true
+    stdin_open: true
+
+volumes:
+  cargo-registry:
+  cargo-git:

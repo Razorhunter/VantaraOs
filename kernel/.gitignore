@@ -1,0 +1,8 @@
+target/
+build/
+
+*.bin
+*.img
+*.iso
+*.qcow2
+*.log

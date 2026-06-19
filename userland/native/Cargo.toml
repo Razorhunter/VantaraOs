@@ -1,0 +1,13 @@
+[package]
+name = "vantara-native-userland"
+version = "0.1.0"
+edition = "2024"
+authors = ["Mohammad Hafifi Abu Bakar"]
+description = "Native no_std userland command sources for Vantara OS"
+license = "Apache-2.0 license"
+
+[lib]
+name = "vantara_userland"
+path = "src/lib.rs"
+
+[dependencies]

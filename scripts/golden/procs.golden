@@ -1,0 +1,7 @@
+# Numeric counters are intentionally omitted because they vary per boot.
+procs total=
+PID  TID  PPID KIND MODE STATE   EXIT WAIT RQ  CTX   TICKS NAME       ARG
+init
+login
+sh
+procs

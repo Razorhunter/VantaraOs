@@ -1,0 +1,19 @@
+# Rust/Cargo build outputs
+target/
+kernel/target/
+kernel/build/
+
+# Bootimage/QEMU artifacts
+*.bin
+*.img
+*.iso
+*.qcow2
+*.log
+
+# Editor and OS noise
+.vscode/
+.idea/
+*.swp
+*~
+.DS_Store
+
