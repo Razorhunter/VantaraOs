@@ -70,6 +70,7 @@ pub struct Writer {
 
 impl Writer {
     pub fn write_byte(&mut self, byte: u8) {
+        let mouse = self.suspend_mouse_cursor();
         self.hide_text_cursor();
         match byte {
             b'\n' => self.new_line(),
@@ -92,6 +93,7 @@ impl Writer {
         }
         self.reset_text_cursor_blink();
         self.show_text_cursor();
+        self.resume_mouse_cursor(mouse);
     }
 
     pub fn write_string(&mut self, s: &str) {
@@ -106,18 +108,22 @@ impl Writer {
     }
 
     pub fn set_color(&mut self, foreground: Color, background: Color) {
+        let mouse = self.suspend_mouse_cursor();
         self.hide_text_cursor();
         self.color_code = ColorCode::new(foreground, background);
         self.show_text_cursor();
+        self.resume_mouse_cursor(mouse);
     }
 
     pub fn clear_screen(&mut self) {
+        let mouse = self.suspend_mouse_cursor();
         self.hide_text_cursor();
         for row in 0..BUFFER_HEIGHT {
             self.clear_row(row);
         }
         self.column_position = 0;
         self.show_text_cursor();
+        self.resume_mouse_cursor(mouse);
     }
 
     pub fn backspace(&mut self) {
@@ -129,6 +135,7 @@ impl Writer {
     }
 
     pub fn erase_previous(&mut self) {
+        let mouse = self.suspend_mouse_cursor();
         self.hide_text_cursor();
         self.backspace();
         let row = BUFFER_HEIGHT - 1;
@@ -139,6 +146,7 @@ impl Writer {
         });
         self.reset_text_cursor_blink();
         self.show_text_cursor();
+        self.resume_mouse_cursor(mouse);
     }
 
     pub fn write_at(
@@ -153,6 +161,7 @@ impl Writer {
             return;
         }
 
+        let mouse = self.suspend_mouse_cursor();
         self.hide_text_cursor();
         let byte = match byte {
             0x20..=0x7e => byte,
@@ -163,6 +172,7 @@ impl Writer {
             color_code: ColorCode::new(foreground, background),
         });
         self.show_text_cursor();
+        self.resume_mouse_cursor(mouse);
     }
 
     fn new_line(&mut self) {
@@ -191,6 +201,7 @@ impl Writer {
             return Ok(());
         }
 
+        let mouse = self.suspend_mouse_cursor();
         self.hide_text_cursor();
         let saved_column = self.column_position;
         self.clear_row(row);
@@ -201,6 +212,7 @@ impl Writer {
 
         self.column_position = saved_column;
         self.show_text_cursor();
+        self.resume_mouse_cursor(mouse);
         Ok(())
     }
 
@@ -235,13 +247,26 @@ impl Writer {
     }
 
     pub fn clear_mouse_cursor(&mut self) {
-        if self.mouse_visible {
-            let char = ScreenChar {
-                ascii_character: self.original_char,
-                color_code: self.original_color_code,
-            };
-            self.buffer.chars[self.mouse_row][self.mouse_col].write(char);
-            self.mouse_visible = false;
+        let _ = self.suspend_mouse_cursor();
+    }
+
+    fn suspend_mouse_cursor(&mut self) -> Option<(usize, usize)> {
+        if !self.mouse_visible {
+            return None;
+        }
+
+        let position = (self.mouse_col, self.mouse_row);
+        self.buffer.chars[self.mouse_row][self.mouse_col].write(ScreenChar {
+            ascii_character: self.original_char,
+            color_code: self.original_color_code,
+        });
+        self.mouse_visible = false;
+        Some(position)
+    }
+
+    fn resume_mouse_cursor(&mut self, position: Option<(usize, usize)>) {
+        if let Some((col, row)) = position {
+            self.draw_mouse_cursor(col, row);
         }
     }
 
@@ -288,6 +313,7 @@ impl Writer {
             return;
         }
 
+        let mouse = self.suspend_mouse_cursor();
         self.text_cursor_last_blink_tick = ticks;
         if self.text_cursor_visible {
             self.hide_text_cursor();
@@ -296,6 +322,7 @@ impl Writer {
             self.text_cursor_blink_on = true;
             self.show_text_cursor();
         }
+        self.resume_mouse_cursor(mouse);
     }
 }
 
@@ -463,5 +490,32 @@ fn test_println_output() {
             let screen_char = writer.buffer.chars[BUFFER_HEIGHT - 2][i].read();
             assert_eq!(char::from(screen_char.ascii_character), c);
         }
+    });
+}
+
+#[test_case]
+fn mouse_overlay_does_not_restore_stale_character_after_write() {
+    use x86_64::instructions::interrupts;
+
+    interrupts::without_interrupts(|| {
+        let mut writer = WRITER.lock();
+        writer.clear_screen();
+        let color_code = writer.color_code;
+        writer.buffer.chars[10][10].write(ScreenChar {
+            ascii_character: b'o',
+            color_code,
+        });
+        writer.draw_mouse_cursor(10, 10);
+
+        writer.write_at(10, 10, b'R', Color::Yellow, Color::Black);
+        writer.draw_mouse_cursor(11, 10);
+
+        let restored = writer.buffer.chars[10][10].read();
+        assert_eq!(restored.ascii_character, b'R');
+        assert_eq!(
+            restored.color_code,
+            ColorCode::new(Color::Yellow, Color::Black)
+        );
+        writer.clear_mouse_cursor();
     });
 }

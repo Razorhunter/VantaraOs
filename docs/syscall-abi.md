@@ -1,6 +1,6 @@
 # Vantara Syscall ABI
 
-This document defines **Vantara Native ABI v1.0** for Ring-3 programs. ABI v1 is
+This document defines **Vantara Native ABI v1.1** for Ring-3 programs. ABI v1 is
 the compatibility contract between the kernel and native Vantara userland.
 Userland commands should use the shared wrapper in
 `userland/native/src/abi.rs` instead of open-coding `int 0x80`.
@@ -77,6 +77,14 @@ kernel-space, and ownerless ranges before dereferencing them.
 | 26 | `SYS_KLOG_READ` | `out_ptr`, `out_len` | bytes copied |
 | 27 | `SYS_DRIVER_STATUS` | `out_ptr`, `out_len` | bytes copied |
 | 28 | `SYS_ABI_INFO` | none | ABI version `(major << 32) | minor` |
+| 29 | `SYS_THREAD_CREATE` | entry, stack pointer, stack length, argument | new TID or negative error |
+| 30 | `SYS_THREAD_EXIT` | none | does not return |
+
+`SYS_THREAD_CREATE` starts a thread in the caller's process and address space.
+The caller supplies a writable, non-overlapping stack buffer of at least 1024
+bytes. The new thread begins at `entry` with `argument` in `RDI`. Its entry
+function must terminate through `SYS_THREAD_EXIT`; returning directly is not
+supported yet.
 
 ## Stable Error Values
 

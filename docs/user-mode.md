@@ -85,6 +85,15 @@ Each process has:
 - address-space descriptor
 - file handle vector placeholder
 
+Each process owns a thread store with one main thread. Scheduling state, saved
+Ring-3 context, runtime ticks, and context-switch counters belong to threads
+rather than processes. PIDs and TIDs use separate allocators, and the ready
+queue stores TIDs. The model can register additional threads sharing a process
+address space. ABI v1.1 provides `SYS_THREAD_CREATE` and `SYS_THREAD_EXIT`;
+userland supplies a dedicated writable stack buffer, while the kernel validates
+non-overlap, constructs the initial register context, assigns a TID, and queues
+the thread for scheduling.
+
 The current process table creates a placeholder init process and registers a
 first Ring-3 task prototype so kernel-side tools can inspect process state
 before Ring-3 execution is enabled.

@@ -36,15 +36,19 @@ pub const SYS_NETDEV_LIST: u64 = 25;
 pub const SYS_KLOG_READ: u64 = 26;
 pub const SYS_DRIVER_STATUS: u64 = 27;
 pub const SYS_ABI_INFO: u64 = 28;
+pub const SYS_THREAD_CREATE: u64 = 29;
+pub const SYS_THREAD_EXIT: u64 = 30;
 
 pub const ABI_VERSION_MAJOR: u64 = 1;
-pub const ABI_VERSION_MINOR: u64 = 0;
+pub const ABI_VERSION_MINOR: u64 = 1;
 pub const ABI_VERSION: u64 = (ABI_VERSION_MAJOR << 32) | ABI_VERSION_MINOR;
 
 pub const SYSCALL_RETURN_TO_KERNEL: u64 = u64::MAX;
 const MAX_WRITE_LEN: u64 = 1024;
 const MAX_PATH_LEN: u64 = 128;
 const MAX_READ_LEN: u64 = 1024;
+const MIN_USER_THREAD_STACK_SIZE: u64 = 1024;
+const MAX_USER_THREAD_STACK_SIZE: u64 = 64 * 1024;
 const MAX_OPEN_FILES: usize = 16;
 const OPEN_FILE_BUFFER_SIZE: usize = 256;
 const STDIN: u64 = 0;
@@ -269,6 +273,7 @@ const _: () = {
     assert!(SYS_EXIT == 1);
     assert!(SYS_DRIVER_STATUS == 27);
     assert!(SYS_ABI_INFO == 28);
+    assert!(SYS_THREAD_EXIT == 30);
     assert!(SyscallError::UnknownSyscall as i64 == -1);
     assert!(SyscallError::WouldBlock as i64 == -6);
 };
@@ -335,6 +340,19 @@ pub extern "C" fn syscall_interrupt_dispatch(frame: &SyscallFrame) -> u64 {
             pid
         );
         return SYSCALL_RETURN_TO_KERNEL;
+    }
+
+    if frame.number == SYS_THREAD_EXIT {
+        let result = crate::user::process::mark_current_thread_exited();
+        crate::serial_println!(
+            "[SYSCALL] SYS_THREAD_EXIT pid_tid={:?}; thread checked out",
+            result
+        );
+        return if result.is_some() {
+            SYSCALL_RETURN_TO_KERNEL
+        } else {
+            SyscallError::InvalidArgument as i64 as u64
+        };
     }
 
     if frame.number == SYS_WRITE {
@@ -597,6 +615,8 @@ pub fn dispatch(frame: SyscallFrame) -> Result<u64, SyscallError> {
         SYS_KLOG_READ => kernel_log_to_user(frame.arg0, frame.arg1),
         SYS_DRIVER_STATUS => driver_status_to_user(frame.arg0, frame.arg1),
         SYS_ABI_INFO => Ok(ABI_VERSION),
+        SYS_THREAD_CREATE => create_user_thread(frame.arg0, frame.arg1, frame.arg2, frame.arg3),
+        SYS_THREAD_EXIT => Err(SyscallError::NotImplemented),
         SYS_SLEEP_MS => Err(SyscallError::NotImplemented),
         SYS_YIELD => Err(SyscallError::NotImplemented),
         SYS_EXIT => Err(SyscallError::NotImplemented),
@@ -605,29 +625,67 @@ pub fn dispatch(frame: SyscallFrame) -> Result<u64, SyscallError> {
     }
 }
 
+fn create_user_thread(
+    entry: u64,
+    stack_ptr: u64,
+    stack_len: u64,
+    arg: u64,
+) -> Result<u64, SyscallError> {
+    if stack_len < MIN_USER_THREAD_STACK_SIZE || stack_len > MAX_USER_THREAD_STACK_SIZE {
+        return Err(SyscallError::InvalidArgument);
+    }
+
+    let layout =
+        crate::user::process::current_user_layout().ok_or(SyscallError::InvalidArgument)?;
+    if entry < layout.program_start || entry >= layout.program_end {
+        return Err(SyscallError::InvalidArgument);
+    }
+    UserRange::checked(entry, 1, UserAccess::Read)?;
+    UserRange::checked(stack_ptr, stack_len, UserAccess::Write)?;
+
+    let stack_top = stack_ptr
+        .checked_add(stack_len)
+        .ok_or(SyscallError::InvalidArgument)?;
+    let aligned_top = stack_top & !0xf;
+    let initial_rsp = aligned_top
+        .checked_sub(8)
+        .filter(|rsp| *rsp >= stack_ptr)
+        .ok_or(SyscallError::InvalidArgument)?;
+
+    crate::user::process::create_current_user_thread(entry, stack_ptr, stack_top, initial_rsp, arg)
+        .map(u64::from)
+        .ok_or(SyscallError::InvalidArgument)
+}
+
 fn user_yield(frame: &SyscallFrame) -> Result<u64, SyscallError> {
     let pid = crate::user::process::current_user_pid().unwrap_or(0);
+    let tid = crate::user::process::current_user_tid().unwrap_or(0);
     let name = crate::user::process::current_user_name().unwrap_or("unknown");
-    let has_work =
-        crate::user::program::has_pending() || crate::user::process::has_ready_process_except(pid);
+    let has_work = crate::user::program::has_pending()
+        || crate::user::process::has_ready_thread_except_current();
     if !has_work {
         return Ok(0);
     }
 
     let count = USER_YIELDS.fetch_add(1, Ordering::Relaxed) + 1;
-    let recorded = crate::user::process::record_user_yield(pid);
+    let recorded = crate::user::process::record_current_thread_yield();
     let preempt_requested = crate::user::process::consume_timer_preempt_request_for_yield();
     if count <= 16 || count % 256 == 0 {
         crate::serial_println!(
-            "[USER] yield pid={} name={} count={} preempt={}",
+            "[USER] yield pid={} tid={} name={} count={} preempt={}",
             pid,
+            tid,
             name,
             count,
             preempt_requested as u8
         );
     }
     if !recorded {
-        crate::serial_println!("[USER] yield pid={} was not recorded in process table", pid);
+        crate::serial_println!(
+            "[USER] yield pid={} tid={} was not recorded in process table",
+            pid,
+            tid
+        );
     }
 
     let resume_context = crate::user::process::UserResumeContext::from_syscall_frame(frame);

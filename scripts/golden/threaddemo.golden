@@ -1,0 +1,5 @@
+threaddemo: main started
+threaddemo: worker created
+threaddemo: worker started
+threaddemo: worker exited
+threaddemo: joined

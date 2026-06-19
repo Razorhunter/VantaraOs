@@ -525,9 +525,20 @@ kepada platform OS yang boleh dibandingkan dengan kernel mainstream secara berpe
 - [ ] Thread model awal:
   - [x] process
   - [ ] thread
-    - [x] Main thread identity per process (`TID == PID`).
+    - [x] Main thread identity per process dengan allocator TID berasingan.
     - [x] Sinkronkan lifecycle process/main-thread dan scheduler handoff.
-    - [ ] Support lebih daripada satu thread dalam process yang sama.
+    - [x] Pindahkan saved context/runtime accounting daripada process ke thread.
+    - [x] Tukar user ready queue kepada explicit TID queue.
+    - [x] Tambah per-process thread store dan lookup global berdasarkan TID.
+    - [x] Kira serta papar jumlah thread sebenar dalam `/bin/procs`.
+    - [x] Support lebih daripada satu thread dalam process yang sama.
+      - [x] Model boleh mendaftarkan lebih daripada satu thread yang berkongsi process.
+      - [x] Validate user-supplied stack dan bina initial context secondary thread.
+      - [x] Jadualkan secondary thread secara live melalui `SYS_THREAD_CREATE`.
+      - [x] Tambah `SYS_THREAD_EXIT` tanpa menamatkan seluruh process.
+      - [x] Track current TID merentas cooperative yield dan timer preemption.
+      - [x] Tambah `/bin/threaddemo` QEMU integration smoke.
+      - [ ] Kernel-owned stack allocation dan join/wait primitive.
   - [ ] kernel task
     - [x] Typed kernel-task context dan first-task bootstrap.
     - [x] Buang context-switch entry lama yang tidak selamat/tidak digunakan.

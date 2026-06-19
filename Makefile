@@ -5,7 +5,7 @@ TARGET     := x86_64-vantara_os
 BOOTIMAGE  := $(KERNEL_DIR)/target/$(TARGET)/debug/bootimage-kernel.bin
 QEMU       := qemu-system-x86_64
 
-.PHONY: help build shell docker-preemption-test docker-regression fmt check test run smoke boot-test command-smoke command-smoke-ls command-smoke-cat command-smoke-procs command-smoke-rusthello preemption-test isolation-test artifact-manifest abi-check unsafe-audit regression ci kernel-fmt kernel-check kernel-test kernel-build kernel-run kernel-vnc kernel-headless userland-fmt userland-check userland-bin kernel-clean clean
+.PHONY: help build shell docker-preemption-test docker-regression fmt check test run smoke boot-test command-smoke command-smoke-ls command-smoke-cat command-smoke-procs command-smoke-rusthello command-smoke-threaddemo preemption-test isolation-test artifact-manifest abi-check unsafe-audit regression ci kernel-fmt kernel-check kernel-test kernel-build kernel-run kernel-vnc kernel-headless userland-fmt userland-check userland-bin kernel-clean clean
 
 help:
 	@echo "Vantara OS Build System"
@@ -35,7 +35,6 @@ help:
 	@echo "make kernel-test      - Compile-check kernel test targets"
 	@echo "make kernel-build     - Build kernel"
 	@echo "make kernel-run       - Run kernel"
-	@echo "make kernel-vnc       - Run kernel with VNC"
 	@echo "make kernel-headless  - Run kernel serial only"
 	@echo "make userland-fmt     - Format native userland sources"
 	@echo "make userland-check   - Check native userland sources"
@@ -70,7 +69,7 @@ boot-test: kernel-build
 command-smoke: kernel-build
 	QEMU="$(QEMU)" bash scripts/qemu-command-smoke.sh
 
-command-smoke-ls command-smoke-cat command-smoke-procs command-smoke-rusthello: kernel-build
+command-smoke-ls command-smoke-cat command-smoke-procs command-smoke-rusthello command-smoke-threaddemo: kernel-build
 	QEMU="$(QEMU)" bash scripts/qemu-command-smoke.sh $(@:command-smoke-%=%)
 
 preemption-test: kernel-build
@@ -109,11 +108,6 @@ unsafe-audit:
 kernel-run: kernel-build
 	$(QEMU) \
 		-drive format=raw,file=$(BOOTIMAGE) \
-		-serial stdio
-
-kernel-vnc: kernel-build
-	$(QEMU) \
-		-drive format=raw,file=$(BOOTIMAGE) \
 		-vnc 0.0.0.0:0 \
 		-serial stdio
 
@@ -138,7 +132,7 @@ $(USERLAND_BIN_DIR)/%.bin: $(USERLAND_NATIVE_DIR)/asm/%.asm $(USERLAND_NATIVE_DI
 $(USERLAND_BIN_DIR)/%.elf: $(USERLAND_NATIVE_DIR)/elf/%.rs $(USERLAND_NATIVE_DIR)/elf/linker.ld $(USERLAND_NATIVE_DIR)/src/abi.rs | $(USERLAND_BIN_DIR)
 	rustc --edition=2024 --target x86_64-unknown-none -C panic=abort -C no-redzone=yes -C relocation-model=static -C link-arg=-T$(USERLAND_NATIVE_DIR)/elf/linker.ld -C link-arg=-nostdlib $< -o $@
 
-userland-bin: $(USERLAND_BIN_DIR)/demo.bin $(USERLAND_BIN_DIR)/uptime.bin $(USERLAND_BIN_DIR)/ls.bin $(USERLAND_BIN_DIR)/cat.bin $(USERLAND_BIN_DIR)/whoami.bin $(USERLAND_BIN_DIR)/fault.elf $(USERLAND_BIN_DIR)/init.bin $(USERLAND_BIN_DIR)/login.elf $(USERLAND_BIN_DIR)/sh.elf $(USERLAND_BIN_DIR)/stat.elf $(USERLAND_BIN_DIR)/procs.elf $(USERLAND_BIN_DIR)/pci.elf $(USERLAND_BIN_DIR)/netdev.elf $(USERLAND_BIN_DIR)/dmesg.elf $(USERLAND_BIN_DIR)/drvstat.elf $(USERLAND_BIN_DIR)/kill.elf $(USERLAND_BIN_DIR)/sleep.elf $(USERLAND_BIN_DIR)/yielddemo.elf $(USERLAND_BIN_DIR)/preemptdemo.elf $(USERLAND_BIN_DIR)/rusthello.elf $(USERLAND_BIN_DIR)/pwd.elf
+userland-bin: $(USERLAND_BIN_DIR)/demo.bin $(USERLAND_BIN_DIR)/uptime.bin $(USERLAND_BIN_DIR)/ls.bin $(USERLAND_BIN_DIR)/cat.bin $(USERLAND_BIN_DIR)/whoami.bin $(USERLAND_BIN_DIR)/fault.elf $(USERLAND_BIN_DIR)/init.bin $(USERLAND_BIN_DIR)/login.elf $(USERLAND_BIN_DIR)/sh.elf $(USERLAND_BIN_DIR)/stat.elf $(USERLAND_BIN_DIR)/procs.elf $(USERLAND_BIN_DIR)/pci.elf $(USERLAND_BIN_DIR)/netdev.elf $(USERLAND_BIN_DIR)/dmesg.elf $(USERLAND_BIN_DIR)/drvstat.elf $(USERLAND_BIN_DIR)/kill.elf $(USERLAND_BIN_DIR)/sleep.elf $(USERLAND_BIN_DIR)/yielddemo.elf $(USERLAND_BIN_DIR)/preemptdemo.elf $(USERLAND_BIN_DIR)/threaddemo.elf $(USERLAND_BIN_DIR)/rusthello.elf $(USERLAND_BIN_DIR)/pwd.elf
 
 kernel-clean:
 	cd $(KERNEL_DIR) && cargo clean

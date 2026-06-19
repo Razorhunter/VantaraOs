@@ -29,9 +29,11 @@ pub const SYS_NETDEV_LIST: u64 = 25;
 pub const SYS_KLOG_READ: u64 = 26;
 pub const SYS_DRIVER_STATUS: u64 = 27;
 pub const SYS_ABI_INFO: u64 = 28;
+pub const SYS_THREAD_CREATE: u64 = 29;
+pub const SYS_THREAD_EXIT: u64 = 30;
 
 pub const ABI_VERSION_MAJOR: u64 = 1;
-pub const ABI_VERSION_MINOR: u64 = 0;
+pub const ABI_VERSION_MINOR: u64 = 1;
 pub const ABI_VERSION: u64 = (ABI_VERSION_MAJOR << 32) | ABI_VERSION_MINOR;
 
 pub const ERR_UNKNOWN_SYSCALL: i64 = -1;
@@ -54,6 +56,7 @@ const _: () = {
     assert!(SYS_EXIT == 1);
     assert!(SYS_DRIVER_STATUS == 27);
     assert!(SYS_ABI_INFO == 28);
+    assert!(SYS_THREAD_EXIT == 30);
     assert!(ERR_UNKNOWN_SYSCALL == -1);
     assert!(ERR_WOULD_BLOCK == -6);
 };
@@ -230,6 +233,28 @@ pub fn yield_now() -> u64 {
 
 pub fn sleep_ms(duration_ms: u64) -> i64 {
     unsafe { syscall1(SYS_SLEEP_MS, duration_ms) as i64 }
+}
+
+pub fn thread_create(entry: extern "C" fn(u64) -> !, stack: &mut [u8], arg: u64) -> i64 {
+    unsafe {
+        syscall4(
+            SYS_THREAD_CREATE,
+            entry as usize as u64,
+            stack.as_mut_ptr() as u64,
+            stack.len() as u64,
+            arg,
+        ) as i64
+    }
+}
+
+pub fn thread_exit() -> ! {
+    unsafe {
+        syscall1(SYS_THREAD_EXIT, 0);
+    }
+
+    loop {
+        core::hint::spin_loop();
+    }
 }
 
 pub fn getcwd(out: &mut [u8]) -> i64 {

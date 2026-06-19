@@ -9,7 +9,9 @@ pub fn run_event_loop() -> ! {
             if DEBUG_INPUT_EVENTS {
                 serial_println!("Input event: {:?}", event);
             }
-            crate::shell::handle_event(&event);
+            if !crate::user::process::userland_owns_keyboard() {
+                crate::shell::handle_event(&event);
+            }
 
             let pos = crate::input::get_mouse_position();
             crate::vga_buffer::update_mouse_cursor(pos.x as usize, pos.y as usize);

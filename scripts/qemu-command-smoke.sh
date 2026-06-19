@@ -7,7 +7,7 @@ GOLDEN_DIR="${ROOT_DIR}/scripts/golden"
 QEMU_BIN="${QEMU:-qemu-system-x86_64}"
 CASE="${1:-all}"
 
-CASES=(ls cat procs rusthello)
+CASES=(ls cat procs rusthello threaddemo)
 
 if ! command -v "${QEMU_BIN}" >/dev/null 2>&1; then
   echo "command smoke test skipped: ${QEMU_BIN} not found" >&2
@@ -24,6 +24,7 @@ case_command() {
     cat) echo "cat /MOTD" ;;
     procs) echo "procs" ;;
     rusthello) echo "rusthello" ;;
+    threaddemo) echo "threaddemo" ;;
     *)
       echo "unknown command smoke case: $1" >&2
       return 2
@@ -118,13 +119,14 @@ run_case() (
   local output_file="${ROOT_DIR}/target/qemu-command-${name}.output"
   local monitor_log="${ROOT_DIR}/target/qemu-command-${name}-monitor.log"
   local monitor_fifo="${ROOT_DIR}/target/qemu-command-${name}-monitor.fifo"
+  local screen_file="${ROOT_DIR}/target/qemu-command-${name}.ppm"
   local golden_file="${GOLDEN_DIR}/${name}.golden"
   local qemu_pid=""
   local command_start
 
   command="$(case_command "${name}")"
   mkdir -p "${ROOT_DIR}/target"
-  rm -f "${log_file}" "${output_file}" "${monitor_log}" "${monitor_fifo}"
+  rm -f "${log_file}" "${output_file}" "${screen_file}" "${monitor_log}" "${monitor_fifo}"
   mkfifo "${monitor_fifo}"
   exec 3<>"${monitor_fifo}"
 
@@ -166,6 +168,16 @@ run_case() (
 
   check_golden "${output_file}" "${golden_file}"
 
+  printf 'screendump %s\n' "${screen_file}" >&3
+  for ((attempt = 0; attempt < 50; attempt++)); do
+    [[ -s "${screen_file}" ]] && break
+    sleep 0.1
+  done
+  if [[ ! -s "${screen_file}" ]]; then
+    echo "${name} command smoke test failed: VGA screendump was not created" >&2
+    return 1
+  fi
+
   printf 'quit\n' >&3
   wait "${qemu_pid}" >/dev/null 2>&1 || true
   qemu_pid=""
@@ -173,6 +185,7 @@ run_case() (
   echo "${name} command smoke test passed"
   echo "serial log: ${log_file}"
   echo "command output: ${output_file}"
+  echo "VGA screenshot: ${screen_file}"
 )
 
 if [[ "${CASE}" == "all" ]]; then

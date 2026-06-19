@@ -14,9 +14,11 @@ ORG USER_BASE
 %define SYS_EXEC       13
 %define SYS_WAIT       14
 %define SYS_ABI_INFO   28
+%define SYS_THREAD_CREATE 29
+%define SYS_THREAD_EXIT   30
 
 %define ABI_VERSION_MAJOR 1
-%define ABI_VERSION_MINOR 0
+%define ABI_VERSION_MINOR 1
 
 %define ERR_UNKNOWN_SYSCALL -1
 %define ERR_INVALID_ARGUMENT -2

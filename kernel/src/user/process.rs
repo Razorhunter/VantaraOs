@@ -4,13 +4,14 @@ use lazy_static::lazy_static;
 use spin::Mutex;
 
 use crate::user::address_space::AddressSpace;
-use crate::user::thread::{Thread, ThreadKind, ThreadState, Tid};
+use crate::user::thread::{Thread, ThreadKind, ThreadState, ThreadStore, Tid};
 
 pub type Pid = u32;
 pub const DEFAULT_REAPED_HISTORY_LIMIT: usize = 16;
 pub const USERNAME_MAX_LEN: usize = 16;
 const USER_PREEMPT_QUANTUM_TICKS: u64 = 10;
 static CURRENT_USER_PID_ATOMIC: AtomicU32 = AtomicU32::new(0);
+static CURRENT_USER_TID_ATOMIC: AtomicU32 = AtomicU32::new(0);
 static TIMER_PREEMPT_CHECKS: AtomicU64 = AtomicU64::new(0);
 static TIMER_PREEMPT_REQUESTS: AtomicU64 = AtomicU64::new(0);
 static TIMER_PREEMPT_YIELDS: AtomicU64 = AtomicU64::new(0);
@@ -46,7 +47,7 @@ pub struct Process {
     pub name: &'static str,
     pub program_path: &'static str,
     pub kind: ProcessKind,
-    pub main_thread: Thread,
+    pub threads: ThreadStore,
     pub credentials: ProcessCredentials,
     pub arg: crate::user::program::UserProgramArg,
     pub cwd: crate::fs::NormalizedPath,
@@ -57,10 +58,6 @@ pub struct Process {
     pub exit_status: Option<u64>,
     pub waiting_for: Option<Pid>,
     pub sleeping_until_tick: Option<u64>,
-    pub resume_context: Option<UserResumeContext>,
-    pub context_switches: u64,
-    pub runtime_ticks: u64,
-    pub last_started_tick: Option<u64>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -260,6 +257,27 @@ const _: () = {
 };
 
 impl UserResumeContext {
+    pub const EMPTY: Self = Self {
+        rip: 0,
+        rsp: 0,
+        rflags: 0x202,
+        rbx: 0,
+        rcx: 0,
+        rdx: 0,
+        rsi: 0,
+        rdi: 0,
+        rbp: 0,
+        r8: 0,
+        r9: 0,
+        r10: 0,
+        r11: 0,
+        r12: 0,
+        r13: 0,
+        r14: 0,
+        r15: 0,
+        rax: 0,
+    };
+
     pub const fn from_syscall_frame(frame: &crate::user::syscall::SyscallFrame) -> Self {
         Self {
             rip: frame.user_rip,
@@ -285,9 +303,64 @@ impl UserResumeContext {
 }
 
 impl Process {
+    fn main_tid(&self) -> Tid {
+        self.threads.main_tid()
+    }
+
+    fn main_thread(&self) -> &Thread {
+        self.threads.main()
+    }
+
+    fn main_thread_mut(&mut self) -> &mut Thread {
+        self.threads.main_mut()
+    }
+
     fn set_state(&mut self, state: ProcessState) {
         self.state = state;
-        self.main_thread.state = thread_state_for_process(state);
+        let thread_state = thread_state_for_process(state);
+        if matches!(
+            state,
+            ProcessState::Exited | ProcessState::Zombie | ProcessState::Reaped
+        ) {
+            for thread in self.threads.values_mut() {
+                thread.state = thread_state;
+                thread.resume_context = None;
+                thread.last_started_tick = None;
+            }
+        } else {
+            self.main_thread_mut().state = thread_state;
+        }
+    }
+
+    fn refresh_state_from_threads(&mut self) {
+        if matches!(
+            self.state,
+            ProcessState::Exited | ProcessState::Zombie | ProcessState::Reaped
+        ) {
+            return;
+        }
+
+        self.state = if self
+            .threads
+            .values()
+            .any(|thread| thread.state == ThreadState::Running)
+        {
+            ProcessState::Running
+        } else if self
+            .threads
+            .values()
+            .any(|thread| thread.state == ThreadState::Ready)
+        {
+            ProcessState::Ready
+        } else if self
+            .threads
+            .values()
+            .any(|thread| thread.state == ThreadState::Blocked)
+        {
+            ProcessState::Blocked
+        } else {
+            ProcessState::Created
+        };
     }
 }
 
@@ -342,6 +415,18 @@ impl ProcessStore {
         self.items.iter()
     }
 
+    pub fn get_by_tid(&self, tid: Tid) -> Option<&Process> {
+        self.items
+            .iter()
+            .find(|process| process.threads.get(tid).is_some())
+    }
+
+    pub fn get_by_tid_mut(&mut self, tid: Tid) -> Option<&mut Process> {
+        self.items
+            .iter_mut()
+            .find(|process| process.threads.get(tid).is_some())
+    }
+
     pub fn len(&self) -> usize {
         self.items.len()
     }
@@ -349,8 +434,9 @@ impl ProcessStore {
 
 pub struct ProcessTable {
     processes: ProcessStore,
-    ready_queue: Vec<Pid>,
+    ready_queue: Vec<Tid>,
     next_pid: Pid,
+    next_tid: Tid,
     user_context_switches: u64,
     ready_queue_skips: u64,
 }
@@ -361,6 +447,7 @@ impl ProcessTable {
             processes: ProcessStore::new(),
             ready_queue: Vec::new(),
             next_pid: 1,
+            next_tid: 1,
             user_context_switches: 0,
             ready_queue_skips: 0,
         }
@@ -410,6 +497,12 @@ impl ProcessTable {
         let pid = self.next_pid;
         self.next_pid += 1;
         pid
+    }
+
+    pub fn reserve_tid(&mut self) -> Tid {
+        let tid = self.next_tid;
+        self.next_tid = self.next_tid.saturating_add(1);
+        tid
     }
 
     pub fn create_reserved_process(
@@ -483,6 +576,7 @@ impl ProcessTable {
             ProcessKind::KernelTask => ThreadKind::Kernel,
             ProcessKind::UserProcess => ThreadKind::User,
         };
+        let main_tid = self.reserve_tid();
 
         self.processes.insert(
             pid,
@@ -492,7 +586,12 @@ impl ProcessTable {
                 name,
                 program_path,
                 kind,
-                main_thread: Thread::main(pid, thread_kind),
+                threads: ThreadStore::with_main(
+                    Thread::new(main_tid, pid, thread_kind).with_user_stack(
+                        address_space.layout.stack_start,
+                        address_space.layout.stack_top,
+                    ),
+                ),
                 credentials,
                 arg,
                 cwd,
@@ -503,16 +602,82 @@ impl ProcessTable {
                 exit_status: None,
                 waiting_for: None,
                 sleeping_until_tick: None,
-                resume_context: None,
-                context_switches: 0,
-                runtime_ticks: 0,
-                last_started_tick: None,
             },
         );
     }
 
     pub fn credentials_for(&self, pid: Pid) -> Option<ProcessCredentials> {
         self.processes.get(&pid).map(|process| process.credentials)
+    }
+
+    pub fn create_thread(&mut self, pid: Pid) -> Option<Tid> {
+        let kind = match self.processes.get(&pid)?.kind {
+            ProcessKind::KernelTask => ThreadKind::Kernel,
+            ProcessKind::UserProcess => ThreadKind::User,
+        };
+        let tid = self.reserve_tid();
+        let process = self.processes.get_mut(&pid)?;
+        process
+            .threads
+            .insert(Thread::new(tid, pid, kind))
+            .then_some(tid)
+    }
+
+    pub fn create_user_thread(
+        &mut self,
+        pid: Pid,
+        entry: u64,
+        stack_start: u64,
+        stack_top: u64,
+        initial_rsp: u64,
+        arg: u64,
+    ) -> Option<Tid> {
+        let process = self.processes.get(&pid)?;
+        if process.kind != ProcessKind::UserProcess
+            || !process
+                .threads
+                .stack_range_available(stack_start, stack_top)
+        {
+            return None;
+        }
+
+        let tid = self.reserve_tid();
+        let process = self.processes.get_mut(&pid)?;
+        let mut thread =
+            Thread::new(tid, pid, ThreadKind::User).with_user_stack(stack_start, stack_top);
+        thread.state = ThreadState::Ready;
+        thread.resume_context = Some(UserResumeContext {
+            rip: entry,
+            rsp: initial_rsp,
+            rflags: 0x202,
+            rdi: arg,
+            ..UserResumeContext::EMPTY
+        });
+        if !process.threads.insert(thread) {
+            return None;
+        }
+        process.refresh_state_from_threads();
+        self.enqueue_ready(tid);
+        Some(tid)
+    }
+
+    pub fn mark_thread_exited(&mut self, tid: Tid) -> Option<Pid> {
+        let process = self.processes.get_by_tid_mut(tid)?;
+        if tid == process.main_tid() {
+            return None;
+        }
+        let thread = process.threads.get_mut(tid)?;
+        stop_thread_run(thread);
+        thread.state = ThreadState::Exited;
+        thread.resume_context = None;
+        process.refresh_state_from_threads();
+        let pid = process.pid;
+        self.ready_queue.retain(|queued_tid| *queued_tid != tid);
+        Some(pid)
+    }
+
+    pub fn thread(&self, tid: Tid) -> Option<&Thread> {
+        self.processes.get_by_tid(tid)?.threads.get(tid)
     }
 
     pub fn set_credentials(&mut self, pid: Pid, credentials: ProcessCredentials) -> bool {
@@ -526,7 +691,8 @@ impl ProcessTable {
     pub fn mark_ready(&mut self, pid: Pid) {
         if let Some(process) = self.processes.get_mut(&pid) {
             process.set_state(ProcessState::Ready);
-            self.enqueue_ready(pid);
+            let tid = process.main_tid();
+            self.enqueue_ready(tid);
         }
     }
 
@@ -565,7 +731,7 @@ impl ProcessTable {
         process.exit_status.get_or_insert(0);
         process.waiting_for = None;
         process.sleeping_until_tick = None;
-        process.resume_context = None;
+        process.main_thread_mut().resume_context = None;
         true
     }
 
@@ -583,7 +749,7 @@ impl ProcessTable {
         stop_process_run(process);
         process.waiting_for = Some(child_pid);
         process.sleeping_until_tick = None;
-        process.resume_context = Some(resume_context);
+        process.main_thread_mut().resume_context = Some(resume_context);
         process.set_state(ProcessState::Blocked);
         true
     }
@@ -605,24 +771,35 @@ impl ProcessTable {
         stop_process_run(process);
         process.waiting_for = None;
         process.sleeping_until_tick = Some(wake_tick);
-        process.resume_context = Some(resume_context);
+        process.main_thread_mut().resume_context = Some(resume_context);
         process.set_state(ProcessState::Blocked);
         true
     }
 
     pub fn mark_yielded(&mut self, pid: Pid, resume_context: UserResumeContext) -> bool {
-        let Some(process) = self.processes.get_mut(&pid) else {
+        let Some(tid) = self.processes.get(&pid).map(Process::main_tid) else {
             return false;
         };
-        if process.state != ProcessState::Running {
+        self.mark_thread_yielded(tid, resume_context)
+    }
+
+    pub fn mark_thread_yielded(&mut self, tid: Tid, resume_context: UserResumeContext) -> bool {
+        let Some(process) = self.processes.get_by_tid_mut(tid) else {
+            return false;
+        };
+        let Some(thread) = process.threads.get_mut(tid) else {
+            return false;
+        };
+        if thread.state != ThreadState::Running {
             return false;
         }
 
-        stop_process_run(process);
-        process.resume_context = Some(resume_context);
+        stop_thread_run(thread);
+        thread.resume_context = Some(resume_context);
+        thread.state = ThreadState::Ready;
         process.sleeping_until_tick = None;
-        process.set_state(ProcessState::Ready);
-        self.enqueue_ready(pid);
+        process.refresh_state_from_threads();
+        self.enqueue_ready(tid);
         true
     }
 
@@ -646,7 +823,7 @@ impl ProcessTable {
         if let Some(parent) = self.processes.get_mut(&parent_pid) {
             if parent.waiting_for == Some(child_pid) {
                 parent.waiting_for = None;
-                parent.resume_context = None;
+                parent.main_thread_mut().resume_context = None;
             }
         }
 
@@ -702,7 +879,7 @@ impl ProcessTable {
             return None;
         }
 
-        let resume_context = parent.resume_context?;
+        let resume_context = parent.main_thread().resume_context?;
         let p4_frame = parent.address_space.p4_frame;
 
         if let Some(child) = self.processes.get_mut(&child_pid) {
@@ -711,7 +888,7 @@ impl ProcessTable {
         if let Some(parent) = self.processes.get_mut(&parent_pid) {
             parent.waiting_for = None;
             parent.sleeping_until_tick = None;
-            parent.resume_context = None;
+            parent.main_thread_mut().resume_context = None;
         }
         self.start_process_run(parent_pid);
 
@@ -780,10 +957,15 @@ impl ProcessTable {
 
         let mut woken = 0usize;
         for pid in wake_pids {
-            if let Some(process) = self.processes.get_mut(&pid) {
+            let tid = if let Some(process) = self.processes.get_mut(&pid) {
                 process.sleeping_until_tick = None;
                 process.set_state(ProcessState::Ready);
-                self.enqueue_ready(pid);
+                Some(process.main_tid())
+            } else {
+                None
+            };
+            if let Some(tid) = tid {
+                self.enqueue_ready(tid);
                 woken += 1;
             }
         }
@@ -801,8 +983,8 @@ impl ProcessTable {
 
         let remove_count = reaped_pids.len().saturating_sub(keep);
         for pid in reaped_pids.iter().take(remove_count) {
-            self.processes.remove(pid);
             self.remove_from_ready_queue(*pid);
+            self.processes.remove(pid);
         }
 
         remove_count
@@ -810,21 +992,30 @@ impl ProcessTable {
 
     pub fn dequeue_ready(&mut self) -> Option<Pid> {
         while !self.ready_queue.is_empty() {
-            let pid = self.ready_queue.remove(0);
-            let Some(process) = self.processes.get_mut(&pid) else {
+            let tid = self.ready_queue.remove(0);
+            let Some(process) = self.processes.get_by_tid_mut(tid) else {
                 self.ready_queue_skips = self.ready_queue_skips.saturating_add(1);
                 continue;
             };
-            if process.state != ProcessState::Ready {
+            if process
+                .threads
+                .get(tid)
+                .is_none_or(|thread| thread.state != ThreadState::Ready)
+            {
                 self.ready_queue_skips = self.ready_queue_skips.saturating_add(1);
                 continue;
             }
 
-            process.set_state(ProcessState::Running);
-            process.context_switches = process.context_switches.saturating_add(1);
-            process.last_started_tick = Some(crate::timer::ticks());
+            let thread = process
+                .threads
+                .get_mut(tid)
+                .expect("TID lookup must resolve inside its owning process");
+            thread.state = ThreadState::Running;
+            thread.context_switches = thread.context_switches.saturating_add(1);
+            thread.last_started_tick = Some(crate::timer::ticks());
+            process.refresh_state_from_threads();
             self.user_context_switches += 1;
-            return Some(pid);
+            return Some(process.pid);
         }
 
         None
@@ -832,27 +1023,40 @@ impl ProcessTable {
 
     pub fn schedule_next_ready_user(&mut self) -> Option<ScheduledUserResume> {
         while !self.ready_queue.is_empty() {
-            let pid = self.ready_queue.remove(0);
-            let Some(process) = self.processes.get_mut(&pid) else {
+            let tid = self.ready_queue.remove(0);
+            let Some(process) = self.processes.get_by_tid_mut(tid) else {
                 self.ready_queue_skips = self.ready_queue_skips.saturating_add(1);
                 continue;
             };
-            if process.state != ProcessState::Ready {
+            if process
+                .threads
+                .get(tid)
+                .is_none_or(|thread| thread.state != ThreadState::Ready)
+            {
                 self.ready_queue_skips = self.ready_queue_skips.saturating_add(1);
                 continue;
             }
 
-            let Some(resume_context) = process.resume_context.take() else {
+            let Some(resume_context) = process
+                .threads
+                .get_mut(tid)
+                .and_then(|thread| thread.resume_context.take())
+            else {
                 self.ready_queue_skips = self.ready_queue_skips.saturating_add(1);
                 continue;
             };
-            process.set_state(ProcessState::Running);
-            process.context_switches = process.context_switches.saturating_add(1);
-            process.last_started_tick = Some(crate::timer::ticks());
+            let thread = process
+                .threads
+                .get_mut(tid)
+                .expect("TID lookup must resolve inside its owning process");
+            thread.state = ThreadState::Running;
+            thread.context_switches = thread.context_switches.saturating_add(1);
+            thread.last_started_tick = Some(crate::timer::ticks());
+            process.refresh_state_from_threads();
             self.user_context_switches += 1;
             return Some(ScheduledUserResume {
-                pid,
-                tid: process.main_thread.tid,
+                pid: process.pid,
+                tid,
                 name: process.name,
                 resume_context,
                 p4_frame: process.address_space.p4_frame,
@@ -867,7 +1071,16 @@ impl ProcessTable {
         pid: Pid,
         resume_context: UserResumeContext,
     ) -> Option<ScheduledUserResume> {
-        if !self.has_ready_process_except(pid) || !self.mark_yielded(pid, resume_context) {
+        let tid = self.processes.get(&pid)?.main_tid();
+        self.preempt_running_thread(tid, resume_context)
+    }
+
+    pub fn preempt_running_thread(
+        &mut self,
+        tid: Tid,
+        resume_context: UserResumeContext,
+    ) -> Option<ScheduledUserResume> {
+        if !self.has_ready_thread_except(tid) || !self.mark_thread_yielded(tid, resume_context) {
             return None;
         }
 
@@ -875,36 +1088,67 @@ impl ProcessTable {
     }
 
     pub fn record_user_yield(&mut self, pid: Pid) -> bool {
-        let Some(process) = self.processes.get(&pid) else {
+        let Some(tid) = self.processes.get(&pid).map(Process::main_tid) else {
             return false;
         };
-        if process.state != ProcessState::Running {
+        self.record_thread_yield(tid)
+    }
+
+    pub fn record_thread_yield(&mut self, tid: Tid) -> bool {
+        let Some(process) = self.processes.get_by_tid(tid) else {
+            return false;
+        };
+        if process
+            .threads
+            .get(tid)
+            .is_none_or(|thread| thread.state != ThreadState::Running)
+        {
             return false;
         }
-
         self.user_context_switches += 1;
         true
     }
 
     pub fn has_ready_process_except(&self, pid: Pid) -> bool {
-        self.ready_queue.iter().any(|queued_pid| {
-            *queued_pid != pid
+        let current_tid = self
+            .processes
+            .get(&pid)
+            .map(Process::main_tid)
+            .unwrap_or(pid);
+        self.has_ready_thread_except(current_tid)
+    }
+
+    pub fn has_ready_thread_except(&self, current_tid: Tid) -> bool {
+        self.ready_queue.iter().any(|queued_tid| {
+            *queued_tid != current_tid
                 && self
                     .processes
-                    .get(queued_pid)
-                    .is_some_and(|process| process.state == ProcessState::Ready)
+                    .get_by_tid(*queued_tid)
+                    .and_then(|process| process.threads.get(*queued_tid))
+                    .is_some_and(|thread| thread.state == ThreadState::Ready)
         })
     }
 
     pub fn ready_queue_position(&self, pid: Pid) -> Option<usize> {
+        let tid = self.processes.get(&pid)?.main_tid();
         self.ready_queue
             .iter()
-            .position(|queued_pid| *queued_pid == pid)
+            .position(|queued_tid| *queued_tid == tid)
             .map(|index| index + 1)
     }
 
     pub fn contains_pid(&self, pid: Pid) -> bool {
         self.processes.contains_key(&pid)
+    }
+
+    pub fn has_active_user_session(&self) -> bool {
+        self.processes.values().any(|process| {
+            process.kind == ProcessKind::UserProcess
+                && !matches!(
+                    process.state,
+                    ProcessState::Exited | ProcessState::Zombie | ProcessState::Reaped
+                )
+        })
     }
 
     fn should_init_reap(&self, parent_pid: Option<Pid>) -> bool {
@@ -1026,18 +1270,27 @@ impl ProcessTable {
             timer_preempt_requests: TIMER_PREEMPT_REQUESTS.load(Ordering::Relaxed),
             timer_preempt_yields: TIMER_PREEMPT_YIELDS.load(Ordering::Relaxed),
             timer_preempt_pending: TIMER_PREEMPT_PENDING.load(Ordering::Relaxed),
-            thread_count: self.processes.len(),
+            thread_count: self
+                .processes
+                .values()
+                .map(|process| process.threads.len())
+                .sum(),
         }
     }
 
-    fn enqueue_ready(&mut self, pid: Pid) {
-        if !self.ready_queue.contains(&pid) {
-            self.ready_queue.push(pid);
+    fn enqueue_ready(&mut self, tid: Tid) {
+        if !self.ready_queue.contains(&tid) {
+            self.ready_queue.push(tid);
         }
     }
 
     fn remove_from_ready_queue(&mut self, pid: Pid) {
-        self.ready_queue.retain(|queued| *queued != pid);
+        let tids: Vec<Tid> = self
+            .processes
+            .get(&pid)
+            .map(|process| process.threads.values().map(|thread| thread.tid).collect())
+            .unwrap_or_default();
+        self.ready_queue.retain(|queued| !tids.contains(queued));
     }
 
     fn start_process_run(&mut self, pid: Pid) {
@@ -1045,8 +1298,9 @@ impl ProcessTable {
             TIMER_PREEMPT_PENDING.store(false, Ordering::Relaxed);
             CURRENT_USER_PID_ATOMIC.store(pid, Ordering::Relaxed);
             process.set_state(ProcessState::Running);
-            process.context_switches = process.context_switches.saturating_add(1);
-            process.last_started_tick = Some(crate::timer::ticks());
+            let thread = process.main_thread_mut();
+            thread.context_switches = thread.context_switches.saturating_add(1);
+            thread.last_started_tick = Some(crate::timer::ticks());
             self.user_context_switches += 1;
         }
     }
@@ -1055,41 +1309,54 @@ impl ProcessTable {
 fn stop_process_run(process: &mut Process) {
     if CURRENT_USER_PID_ATOMIC.load(Ordering::Relaxed) == process.pid {
         CURRENT_USER_PID_ATOMIC.store(0, Ordering::Relaxed);
+        CURRENT_USER_TID_ATOMIC.store(0, Ordering::Relaxed);
         TIMER_PREEMPT_PENDING.store(false, Ordering::Relaxed);
     }
-    if let Some(started_at) = process.last_started_tick.take() {
+    stop_thread_run(process.main_thread_mut());
+}
+
+fn stop_thread_run(thread: &mut Thread) {
+    if let Some(started_at) = thread.last_started_tick.take() {
         let elapsed = crate::timer::ticks().saturating_sub(started_at);
-        process.runtime_ticks = process.runtime_ticks.saturating_add(elapsed);
+        thread.runtime_ticks = thread.runtime_ticks.saturating_add(elapsed);
     }
 }
 
 fn runtime_ticks_snapshot(process: &Process, now: u64) -> u64 {
-    let active_elapsed = match (process.state, process.last_started_tick) {
+    let active_elapsed = match (process.state, process.main_thread().last_started_tick) {
         (ProcessState::Running, Some(started_at)) => now.saturating_sub(started_at),
         _ => 0,
     };
-    process.runtime_ticks.saturating_add(active_elapsed)
+    process
+        .main_thread()
+        .runtime_ticks
+        .saturating_add(active_elapsed)
 }
 
 lazy_static! {
     pub static ref PROCESS_TABLE: Mutex<ProcessTable> = Mutex::new(ProcessTable::new());
     static ref CURRENT_USER_PROCESS: Mutex<Option<Pid>> = Mutex::new(None);
+    static ref CURRENT_USER_THREAD: Mutex<Option<Tid>> = Mutex::new(None);
     static ref LAST_EXITED_PROCESS: Mutex<Option<Pid>> = Mutex::new(None);
 }
 
-fn set_current_user_process(pid: Option<Pid>) {
+fn set_current_user(pid: Option<Pid>, tid: Option<Tid>) {
     *CURRENT_USER_PROCESS.lock() = pid;
+    *CURRENT_USER_THREAD.lock() = tid;
     CURRENT_USER_PID_ATOMIC.store(pid.unwrap_or(0), Ordering::Relaxed);
+    CURRENT_USER_TID_ATOMIC.store(tid.unwrap_or(0), Ordering::Relaxed);
     if pid.is_none() {
         TIMER_PREEMPT_PENDING.store(false, Ordering::Relaxed);
     }
 }
 
-fn take_current_user_process() -> Option<Pid> {
+fn take_current_user() -> Option<(Pid, Tid)> {
     let pid = CURRENT_USER_PROCESS.lock().take();
+    let tid = CURRENT_USER_THREAD.lock().take();
     CURRENT_USER_PID_ATOMIC.store(0, Ordering::Relaxed);
+    CURRENT_USER_TID_ATOMIC.store(0, Ordering::Relaxed);
     TIMER_PREEMPT_PENDING.store(false, Ordering::Relaxed);
-    pid
+    Some((pid?, tid?))
 }
 
 pub fn init_process_table() {
@@ -1109,6 +1376,10 @@ pub fn init_process_table() {
 
 pub fn stats() -> ProcessStats {
     PROCESS_TABLE.lock().stats()
+}
+
+pub fn userland_owns_keyboard() -> bool {
+    crate::user::program::has_pending() || PROCESS_TABLE.lock().has_active_user_session()
 }
 
 pub fn record_timer_preemption_check() {
@@ -1153,17 +1424,19 @@ pub fn preempt_current_user(resume_context: UserResumeContext) -> Option<Schedul
         return None;
     }
 
-    let pid = CURRENT_USER_PID_ATOMIC.load(Ordering::Relaxed);
-    if pid == 0 {
+    let tid = CURRENT_USER_TID_ATOMIC.load(Ordering::Relaxed);
+    if tid == 0 {
         return None;
     }
 
     let mut table = PROCESS_TABLE.lock();
-    let resume = table.preempt_running_user(pid, resume_context)?;
+    let resume = table.preempt_running_thread(tid, resume_context)?;
     drop(table);
 
     *CURRENT_USER_PROCESS.lock() = Some(resume.pid);
+    *CURRENT_USER_THREAD.lock() = Some(resume.tid);
     CURRENT_USER_PID_ATOMIC.store(resume.pid, Ordering::Relaxed);
+    CURRENT_USER_TID_ATOMIC.store(resume.tid, Ordering::Relaxed);
     TIMER_PREEMPT_PENDING.store(false, Ordering::Relaxed);
     TIMER_PREEMPT_YIELDS.fetch_add(1, Ordering::Relaxed);
     Some(resume)
@@ -1173,8 +1446,44 @@ pub fn record_user_yield(pid: Pid) -> bool {
     PROCESS_TABLE.lock().record_user_yield(pid)
 }
 
+pub fn record_current_thread_yield() -> bool {
+    let Some(tid) = current_user_tid() else {
+        return false;
+    };
+    PROCESS_TABLE.lock().record_thread_yield(tid)
+}
+
 pub fn has_ready_process_except(pid: Pid) -> bool {
     PROCESS_TABLE.lock().has_ready_process_except(pid)
+}
+
+pub fn has_ready_thread_except_current() -> bool {
+    let Some(tid) = current_user_tid() else {
+        return false;
+    };
+    PROCESS_TABLE.lock().has_ready_thread_except(tid)
+}
+
+pub fn create_current_user_thread(
+    entry: u64,
+    stack_start: u64,
+    stack_top: u64,
+    initial_rsp: u64,
+    arg: u64,
+) -> Option<Tid> {
+    let pid = current_user_pid()?;
+    PROCESS_TABLE
+        .lock()
+        .create_user_thread(pid, entry, stack_start, stack_top, initial_rsp, arg)
+}
+
+pub fn mark_current_thread_exited() -> Option<(Pid, Tid)> {
+    let (pid, tid) = take_current_user()?;
+    if PROCESS_TABLE.lock().mark_thread_exited(tid).is_none() {
+        set_current_user(Some(pid), Some(tid));
+        return None;
+    }
+    Some((pid, tid))
 }
 
 pub fn reserve_pid() -> Pid {
@@ -1239,7 +1548,12 @@ pub fn register_exec(
         address_space,
     );
     table.mark_running_fresh(pid);
-    set_current_user_process(Some(pid));
+    let tid = table
+        .processes
+        .get(&pid)
+        .map(Process::main_tid)
+        .expect("registered process must have a main thread");
+    set_current_user(Some(pid), Some(tid));
     crate::serial_println!(
         "[PROCESS] exec pid={} entry={:#x} stack={:#x} stack_top={:#x} arg_len={}",
         pid,
@@ -1261,7 +1575,7 @@ pub fn register_exec(
 }
 
 pub fn mark_current_user_exited(status: u64) -> Option<Pid> {
-    let pid = take_current_user_process()?;
+    let (pid, _) = take_current_user()?;
     crate::user::syscall::close_process_files(pid);
     let mut table = PROCESS_TABLE.lock();
     let p4_frame = table.p4_frame_for(pid);
@@ -1287,20 +1601,20 @@ pub fn checkout_current_user_if_blocked() -> Option<BlockedUserReport> {
         pid,
         name: process.name,
         waiting_for: process.waiting_for,
-        resume_context: process.resume_context,
+        resume_context: process.main_thread().resume_context,
     };
     drop(table);
-    set_current_user_process(None);
+    set_current_user(None, None);
     Some(report)
 }
 
 pub fn checkout_current_user_if_yielded(
     resume_context: UserResumeContext,
 ) -> Option<YieldedUserReport> {
-    let pid = take_current_user_process()?;
+    let (pid, tid) = take_current_user()?;
     let mut table = PROCESS_TABLE.lock();
-    if !table.mark_yielded(pid, resume_context) {
-        set_current_user_process(Some(pid));
+    if !table.mark_thread_yielded(tid, resume_context) {
+        set_current_user(Some(pid), Some(tid));
         return None;
     }
 
@@ -1315,7 +1629,7 @@ pub fn checkout_current_user_if_yielded(
 pub fn schedule_next_ready_user() -> Option<ScheduledUserResume> {
     let mut table = PROCESS_TABLE.lock();
     let resume = table.schedule_next_ready_user()?;
-    set_current_user_process(Some(resume.pid));
+    set_current_user(Some(resume.pid), Some(resume.tid));
     Some(resume)
 }
 
@@ -1360,7 +1674,9 @@ pub fn contains_pid(pid: Pid) -> bool {
 pub fn resume_waiting_parent(parent_pid: Pid, child_pid: Pid) -> Option<WaitResume> {
     let mut table = PROCESS_TABLE.lock();
     let resume = table.resume_waiting_parent(parent_pid, child_pid)?;
-    set_current_user_process(Some(parent_pid));
+    let tid = table.processes.get(&parent_pid).map(Process::main_tid);
+    drop(table);
+    set_current_user(Some(parent_pid), tid);
     Some(resume)
 }
 
@@ -1383,7 +1699,7 @@ pub fn compact_reaped_history() -> usize {
 }
 
 pub fn mark_current_user_fault(addr: u64, rip: u64, status: u64) -> Option<UserFaultReport> {
-    let pid = take_current_user_process()?;
+    let (pid, _) = take_current_user()?;
     crate::user::syscall::close_process_files(pid);
     let mut table = PROCESS_TABLE.lock();
     let process = table.processes.get(&pid)?;
@@ -1407,7 +1723,7 @@ pub fn mark_current_user_fault(addr: u64, rip: u64, status: u64) -> Option<UserF
 }
 
 pub fn mark_current_user_exception(rip: u64, status: u64) -> Option<UserExceptionReport> {
-    let pid = take_current_user_process()?;
+    let (pid, _) = take_current_user()?;
     crate::user::syscall::close_process_files(pid);
     let mut table = PROCESS_TABLE.lock();
     let process = table.processes.get(&pid)?;
@@ -1460,12 +1776,7 @@ pub fn current_user_pid() -> Option<Pid> {
 }
 
 pub fn current_user_tid() -> Option<Tid> {
-    let pid = current_user_pid()?;
-    PROCESS_TABLE
-        .lock()
-        .processes
-        .get(&pid)
-        .map(|process| process.main_thread.tid)
+    *CURRENT_USER_THREAD.lock()
 }
 
 pub fn current_user_name() -> Option<&'static str> {
@@ -1569,18 +1880,18 @@ pub fn print_processes() {
         crate::println!(
             "pid={} tid={} ppid={:?} kind={:?} mode={:?} name={} state={:?} tstate={:?} status={:?} wait={:?} ctx={} ticks={} resume={:?} as={:?} p4={:?} p4ok={} entry={:#x} mem={:#x}-{:#x} stack={:#x}-{:#x} arg={}",
             process.pid,
-            process.main_thread.tid,
+            process.main_tid(),
             process.parent_pid,
             process.kind,
             process.job_mode,
             process.name,
             process.state,
-            process.main_thread.state,
+            process.main_thread().state,
             process.exit_status,
             process.waiting_for,
-            process.context_switches,
+            process.main_thread().context_switches,
             runtime_ticks_snapshot(process, crate::timer::ticks()),
-            process.resume_context,
+            process.main_thread().resume_context,
             process.address_space.kind,
             process.address_space.p4_frame,
             process.address_space.p4_verified as u8,
@@ -1653,13 +1964,17 @@ pub fn write_processes_to_buffer(
     writer.write_str(" q=");
     writer.write_u64(USER_PREEMPT_QUANTUM_TICKS);
     writer.write_byte(b'\n');
-    writer.write_str("PID  TID  PPID KIND MODE STATE   EXIT WAIT RQ  CTX   TICKS NAME       ARG\n");
+    writer.write_str(
+        "PID  TID  THR PPID KIND MODE STATE   EXIT WAIT RQ  CTX   TICKS NAME       ARG\n",
+    );
     let now = crate::timer::ticks();
 
     for process in table.processes.values() {
         writer.write_u32_padded(process.pid, 4);
         writer.write_byte(b' ');
-        writer.write_u32_padded(process.main_thread.tid, 4);
+        writer.write_u32_padded(process.main_tid(), 4);
+        writer.write_byte(b' ');
+        writer.write_usize_padded(process.threads.len(), 3);
         writer.write_byte(b' ');
         writer.write_opt_u32_padded(process.parent_pid, 4);
         writer.write_byte(b' ');
@@ -1676,7 +1991,7 @@ pub fn write_processes_to_buffer(
         writer.write_byte(b' ');
         writer.write_opt_usize_padded(table.ready_queue_position(process.pid), 3);
         writer.write_byte(b' ');
-        writer.write_u64_padded(process.context_switches, 5);
+        writer.write_u64_padded(process.main_thread().context_switches, 5);
         writer.write_byte(b' ');
         writer.write_u64_padded(runtime_ticks_snapshot(process, now), 5);
         writer.write_byte(b' ');
@@ -1743,6 +2058,12 @@ impl<'a> BufferWriter<'a> {
 
     fn write_usize(&mut self, value: usize) {
         self.write_u64(value as u64);
+    }
+
+    fn write_usize_padded(&mut self, value: usize, width: usize) {
+        let digits = decimal_len(value as u64);
+        self.write_usize(value);
+        self.pad_to_width(digits, width);
     }
 
     fn write_u32(&mut self, value: u32) {
@@ -1897,9 +2218,9 @@ mod tests {
             table.processes.get(&pid).unwrap().kind,
             ProcessKind::UserProcess
         );
-        assert_eq!(table.processes.get(&pid).unwrap().main_thread.tid, pid);
+        assert_eq!(table.processes.get(&pid).unwrap().main_tid(), pid);
         assert_eq!(
-            table.processes.get(&pid).unwrap().main_thread.state,
+            table.processes.get(&pid).unwrap().main_thread().state,
             crate::user::thread::ThreadState::Created
         );
         table.mark_ready(pid);
@@ -1908,7 +2229,7 @@ mod tests {
             ProcessState::Ready
         );
         assert_eq!(
-            table.processes.get(&pid).unwrap().main_thread.state,
+            table.processes.get(&pid).unwrap().main_thread().state,
             crate::user::thread::ThreadState::Ready
         );
         assert_eq!(table.stats().ready_count, 1);
@@ -1920,12 +2241,74 @@ mod tests {
             ProcessState::Zombie
         );
         assert_eq!(
-            table.processes.get(&pid).unwrap().main_thread.state,
+            table.processes.get(&pid).unwrap().main_thread().state,
             crate::user::thread::ThreadState::Zombie
         );
         assert_eq!(table.processes.get(&pid).unwrap().exit_status, Some(7));
         assert_eq!(table.stats().exited_count, 1);
         assert_eq!(table.stats().ready_queue_count, 0);
+    }
+
+    #[test_case]
+    fn process_thread_store_uses_independent_tid_allocator() {
+        let mut table = ProcessTable::new();
+        let skipped_pid = table.reserve_pid();
+        let pid = table.reserve_pid();
+        assert_eq!(skipped_pid, 1);
+        assert_eq!(pid, 2);
+
+        table.create_reserved_process(
+            pid,
+            Some(1),
+            "worker",
+            "/bin/worker",
+            crate::user::program::UserProgramArg::empty(),
+            AddressSpace::kernel_placeholder(0x400000),
+        );
+        let main_tid = table.processes.get(&pid).unwrap().main_tid();
+        let worker_tid = table
+            .create_thread(pid)
+            .expect("existing process should accept another thread");
+
+        assert_eq!(main_tid, 1);
+        assert_ne!(main_tid, pid);
+        assert_eq!(worker_tid, 2);
+        assert_eq!(table.thread(worker_tid).unwrap().process_id, pid);
+        assert_eq!(table.processes.get(&pid).unwrap().threads.len(), 2);
+        assert_eq!(table.stats().thread_count, 2);
+    }
+
+    #[test_case]
+    fn secondary_user_thread_has_independent_stack_context_and_schedule_slot() {
+        let mut table = ProcessTable::new();
+        let pid = table.create_process(
+            Some(1),
+            "thread-test",
+            "/bin/thread-test",
+            crate::user::program::UserProgramArg::empty(),
+            AddressSpace::kernel_shared_user(
+                0x400000,
+                crate::user::ring3::memory_layout_for_pid(2),
+            ),
+        );
+        let tid = table
+            .create_user_thread(pid, 0x401000, 0x1020000, 0x1021000, 0x1020ff8, 77)
+            .expect("valid secondary thread should be created");
+
+        assert_eq!(table.stats().thread_count, 2);
+        let thread = table.thread(tid).unwrap();
+        assert_eq!(thread.state, crate::user::thread::ThreadState::Ready);
+        assert_eq!(thread.user_stack_start, Some(0x1020000));
+        assert_eq!(thread.user_stack_top, Some(0x1021000));
+        assert_eq!(thread.resume_context.unwrap().rdi, 77);
+
+        let scheduled = table
+            .schedule_next_ready_user()
+            .expect("secondary thread should be schedulable");
+        assert_eq!(scheduled.pid, pid);
+        assert_eq!(scheduled.tid, tid);
+        assert_eq!(scheduled.resume_context.rip, 0x401000);
+        assert_eq!(scheduled.resume_context.rsp, 0x1020ff8);
     }
 
     #[test_case]
@@ -1959,6 +2342,33 @@ mod tests {
         );
         assert_eq!(table.stats().kernel_task_count, 1);
         assert_eq!(table.stats().user_process_count, 1);
+    }
+
+    #[test_case]
+    fn active_user_process_owns_keyboard_session() {
+        let mut table = ProcessTable::new();
+        let kernel = table.create_process(
+            None,
+            "kernel",
+            "kernel",
+            crate::user::program::UserProgramArg::empty(),
+            AddressSpace::kernel_placeholder(0),
+        );
+        table.mark_ready(kernel);
+        assert!(!table.has_active_user_session());
+
+        let user = table.create_process(
+            Some(kernel),
+            "login",
+            "/bin/login",
+            crate::user::program::UserProgramArg::empty(),
+            AddressSpace::kernel_placeholder(0x400000),
+        );
+        table.mark_ready(user);
+        assert!(table.has_active_user_session());
+
+        table.mark_exited(user, 0);
+        assert!(!table.has_active_user_session());
     }
 
     #[test_case]
@@ -2063,10 +2473,26 @@ mod tests {
         );
         assert_eq!(table.ready_queue_position(first), None);
         assert_eq!(table.ready_queue_position(second), Some(1));
-        assert_eq!(table.processes.get(&first).unwrap().context_switches, 1);
+        assert_eq!(
+            table
+                .processes
+                .get(&first)
+                .unwrap()
+                .main_thread()
+                .context_switches,
+            1
+        );
         assert_eq!(table.dequeue_ready(), Some(second));
         assert_eq!(table.ready_queue_position(second), None);
-        assert_eq!(table.processes.get(&second).unwrap().context_switches, 1);
+        assert_eq!(
+            table
+                .processes
+                .get(&second)
+                .unwrap()
+                .main_thread()
+                .context_switches,
+            1
+        );
         assert_eq!(table.dequeue_ready(), None);
         assert_eq!(table.stats().user_context_switches, 2);
         assert_eq!(table.stats().ready_queue_skips, 0);
@@ -2112,11 +2538,27 @@ mod tests {
         let resume_context = resume_context(0x401234, 0x7ff000);
 
         table.mark_running(pid);
-        assert_eq!(table.processes.get(&pid).unwrap().context_switches, 1);
+        assert_eq!(
+            table
+                .processes
+                .get(&pid)
+                .unwrap()
+                .main_thread()
+                .context_switches,
+            1
+        );
         assert!(table.mark_yielded(pid, resume_context));
         assert_eq!(table.stats().ready_count, 1);
         assert_eq!(table.stats().ready_queue_count, 1);
-        assert_eq!(table.processes.get(&pid).unwrap().last_started_tick, None);
+        assert_eq!(
+            table
+                .processes
+                .get(&pid)
+                .unwrap()
+                .main_thread()
+                .last_started_tick,
+            None
+        );
 
         let resume = table
             .schedule_next_ready_user()
@@ -2128,12 +2570,21 @@ mod tests {
             table.processes.get(&pid).unwrap().state,
             ProcessState::Running
         );
-        assert_eq!(table.processes.get(&pid).unwrap().context_switches, 2);
+        assert_eq!(
+            table
+                .processes
+                .get(&pid)
+                .unwrap()
+                .main_thread()
+                .context_switches,
+            2
+        );
         assert!(
             table
                 .processes
                 .get(&pid)
                 .unwrap()
+                .main_thread()
                 .last_started_tick
                 .is_some()
         );

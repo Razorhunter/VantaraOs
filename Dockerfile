@@ -21,7 +21,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     pkg-config \
     && rm -rf /var/lib/apt/lists/*
 
-RUN rustup component add rust-src llvm-tools-preview rustfmt clippy
+RUN rustup component add rust-src llvm-tools-preview rustfmt clippy \
+    && rustup target add x86_64-unknown-none
 
 RUN cargo install bootimage
 
