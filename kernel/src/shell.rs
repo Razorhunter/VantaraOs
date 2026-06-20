@@ -1,6 +1,6 @@
+use crate::sync::PreemptMutex as Mutex;
 use lazy_static::lazy_static;
 use pc_keyboard::KeyCode;
-use spin::Mutex;
 
 use crate::input::InputEvent;
 use crate::{allocator, console, fs, power, print, println, scheduler};
@@ -110,10 +110,11 @@ fn execute_command(command: &str) -> bool {
         "tasks" => {
             let stats = scheduler::SCHEDULER.stats();
             println!(
-                "tasks total={} ready={} current={:?} switches={} ticks={}",
+                "tasks threads={} ready={} current_tid={:?} idle_tid={:?} switches={} ticks={}",
                 stats.total_tasks,
                 stats.ready_tasks,
                 stats.current_task,
+                stats.idle_thread,
                 stats.total_context_switches,
                 stats.total_ticks
             );

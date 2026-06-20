@@ -15,6 +15,7 @@ pub enum ThreadState {
     Ready,
     Running,
     Blocked,
+    Stopped,
     Exited,
     Zombie,
     Reaped,
@@ -27,11 +28,14 @@ pub struct Thread {
     pub kind: ThreadKind,
     pub state: ThreadState,
     pub resume_context: Option<crate::user::process::UserResumeContext>,
+    pub signal_return_context: Option<crate::user::process::UserResumeContext>,
     pub context_switches: u64,
     pub runtime_ticks: u64,
     pub last_started_tick: Option<u64>,
     pub user_stack_start: Option<u64>,
     pub user_stack_top: Option<u64>,
+    pub kernel_managed_stack: bool,
+    pub waiting_for: Option<Tid>,
 }
 
 impl Thread {
@@ -42,17 +46,25 @@ impl Thread {
             kind,
             state: ThreadState::Created,
             resume_context: None,
+            signal_return_context: None,
             context_switches: 0,
             runtime_ticks: 0,
             last_started_tick: None,
             user_stack_start: None,
             user_stack_top: None,
+            kernel_managed_stack: false,
+            waiting_for: None,
         }
     }
 
     pub const fn with_user_stack(mut self, stack_start: u64, stack_top: u64) -> Self {
         self.user_stack_start = Some(stack_start);
         self.user_stack_top = Some(stack_top);
+        self
+    }
+
+    pub const fn with_kernel_managed_stack(mut self) -> Self {
+        self.kernel_managed_stack = true;
         self
     }
 }

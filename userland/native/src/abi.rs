@@ -31,9 +31,28 @@ pub const SYS_DRIVER_STATUS: u64 = 27;
 pub const SYS_ABI_INFO: u64 = 28;
 pub const SYS_THREAD_CREATE: u64 = 29;
 pub const SYS_THREAD_EXIT: u64 = 30;
+pub const SYS_THREAD_JOIN: u64 = 31;
+pub const SYS_THREAD_SPAWN: u64 = 32;
+pub const SYS_PIPE: u64 = 33;
+pub const SYS_EVENT_CREATE: u64 = 34;
+pub const SYS_EVENT_WAIT: u64 = 35;
+pub const SYS_EVENT_SIGNAL: u64 = 36;
+pub const SYS_EVENT_CLOSE: u64 = 37;
+pub const SYS_MSGQ_CREATE: u64 = 38;
+pub const SYS_MSGQ_SEND: u64 = 39;
+pub const SYS_MSGQ_RECV: u64 = 40;
+pub const SYS_MSGQ_CLOSE: u64 = 41;
+pub const SYS_SIGPROCMASK: u64 = 42;
+pub const SYS_SIGPENDING: u64 = 43;
+pub const SYS_SIGACTION: u64 = 44;
+pub const SYS_SIGRETURN: u64 = 45;
+pub const SYS_GETPGRP: u64 = 46;
+pub const SYS_SETPGID: u64 = 47;
+pub const SYS_GETSID: u64 = 48;
+pub const SYS_SETSID: u64 = 49;
 
 pub const ABI_VERSION_MAJOR: u64 = 1;
-pub const ABI_VERSION_MINOR: u64 = 1;
+pub const ABI_VERSION_MINOR: u64 = 10;
 pub const ABI_VERSION: u64 = (ABI_VERSION_MAJOR << 32) | ABI_VERSION_MINOR;
 
 pub const ERR_UNKNOWN_SYSCALL: i64 = -1;
@@ -42,6 +61,18 @@ pub const ERR_NOT_IMPLEMENTED: i64 = -3;
 pub const ERR_NO_SUCH_PROCESS: i64 = -4;
 pub const ERR_NOT_CHILD: i64 = -5;
 pub const ERR_WOULD_BLOCK: i64 = -6;
+pub const ERR_PERMISSION_DENIED: i64 = -7;
+
+pub const SIG_BLOCK: u64 = 0;
+pub const SIG_UNBLOCK: u64 = 1;
+pub const SIG_SETMASK: u64 = 2;
+pub const SIGTERM: u64 = 15;
+pub const SIGCONT: u64 = 18;
+pub const SIGTSTP: u64 = 20;
+pub const SIGINT: u64 = 2;
+pub const SIGTERM_MASK: u64 = 1 << (SIGTERM - 1);
+pub const SIG_DFL: u64 = 0;
+pub const SIG_IGN: u64 = 1;
 
 pub const STDOUT: u64 = 1;
 pub const STDERR: u64 = 2;
@@ -57,8 +88,22 @@ const _: () = {
     assert!(SYS_DRIVER_STATUS == 27);
     assert!(SYS_ABI_INFO == 28);
     assert!(SYS_THREAD_EXIT == 30);
+    assert!(SYS_THREAD_JOIN == 31);
+    assert!(SYS_THREAD_SPAWN == 32);
+    assert!(SYS_PIPE == 33);
+    assert!(SYS_EVENT_CLOSE == 37);
+    assert!(SYS_MSGQ_CLOSE == 41);
+    assert!(SYS_SIGPROCMASK == 42);
+    assert!(SYS_SIGPENDING == 43);
+    assert!(SYS_SIGACTION == 44);
+    assert!(SYS_SIGRETURN == 45);
+    assert!(SYS_GETPGRP == 46);
+    assert!(SYS_SETPGID == 47);
+    assert!(SYS_GETSID == 48);
+    assert!(SYS_SETSID == 49);
     assert!(ERR_UNKNOWN_SYSCALL == -1);
     assert!(ERR_WOULD_BLOCK == -6);
+    assert!(ERR_PERMISSION_DENIED == -7);
 };
 
 #[derive(Debug, Clone, Copy, Default)]
@@ -178,6 +223,62 @@ pub fn close(fd: u64) -> i64 {
     unsafe { syscall1(SYS_CLOSE, fd) as i64 }
 }
 
+pub fn pipe(fds: &mut [u64; 2]) -> i64 {
+    unsafe {
+        syscall2(
+            SYS_PIPE,
+            fds.as_mut_ptr() as u64,
+            core::mem::size_of::<[u64; 2]>() as u64,
+        ) as i64
+    }
+}
+
+pub fn event_create() -> i64 {
+    unsafe { syscall1(SYS_EVENT_CREATE, 0) as i64 }
+}
+
+pub fn event_wait(handle: u64) -> i64 {
+    unsafe { syscall1(SYS_EVENT_WAIT, handle) as i64 }
+}
+
+pub fn event_signal(handle: u64) -> i64 {
+    unsafe { syscall1(SYS_EVENT_SIGNAL, handle) as i64 }
+}
+
+pub fn event_close(handle: u64) -> i64 {
+    unsafe { syscall1(SYS_EVENT_CLOSE, handle) as i64 }
+}
+
+pub fn msgq_create() -> i64 {
+    unsafe { syscall1(SYS_MSGQ_CREATE, 0) as i64 }
+}
+
+pub fn msgq_send(handle: u64, message: &[u8]) -> i64 {
+    unsafe {
+        syscall3(
+            SYS_MSGQ_SEND,
+            handle,
+            message.as_ptr() as u64,
+            message.len() as u64,
+        ) as i64
+    }
+}
+
+pub fn msgq_receive(handle: u64, out: &mut [u8]) -> i64 {
+    unsafe {
+        syscall3(
+            SYS_MSGQ_RECV,
+            handle,
+            out.as_mut_ptr() as u64,
+            out.len() as u64,
+        ) as i64
+    }
+}
+
+pub fn msgq_close(handle: u64) -> i64 {
+    unsafe { syscall1(SYS_MSGQ_CLOSE, handle) as i64 }
+}
+
 pub fn exec(path: &str, arg: Option<&str>) -> i64 {
     exec_bytes(path.as_bytes(), arg.map(str::as_bytes))
 }
@@ -227,6 +328,47 @@ pub fn kill(pid: u64, signal: u64) -> i64 {
     unsafe { syscall2(SYS_KILL, pid, signal) as i64 }
 }
 
+pub fn sigprocmask(how: u64, mask: u64) -> i64 {
+    unsafe { syscall2(SYS_SIGPROCMASK, how, mask) as i64 }
+}
+
+pub fn sigpending() -> i64 {
+    unsafe { syscall1(SYS_SIGPENDING, 0) as i64 }
+}
+
+pub fn sigaction(signal: u64, handler: extern "C" fn(u64) -> !) -> i64 {
+    unsafe { syscall2(SYS_SIGACTION, signal, handler as usize as u64) as i64 }
+}
+
+pub fn sigaction_disposition(signal: u64, disposition: u64) -> i64 {
+    unsafe { syscall2(SYS_SIGACTION, signal, disposition) as i64 }
+}
+
+pub fn sigreturn() -> ! {
+    unsafe {
+        syscall1(SYS_SIGRETURN, 0);
+    }
+    loop {
+        core::hint::spin_loop();
+    }
+}
+
+pub fn getpgrp() -> i64 {
+    unsafe { syscall1(SYS_GETPGRP, 0) as i64 }
+}
+
+pub fn setpgid(pid: u64, process_group_id: u64) -> i64 {
+    unsafe { syscall2(SYS_SETPGID, pid, process_group_id) as i64 }
+}
+
+pub fn getsid(pid: u64) -> i64 {
+    unsafe { syscall1(SYS_GETSID, pid) as i64 }
+}
+
+pub fn setsid() -> i64 {
+    unsafe { syscall1(SYS_SETSID, 0) as i64 }
+}
+
 pub fn yield_now() -> u64 {
     unsafe { syscall1(SYS_YIELD, 0) }
 }
@@ -255,6 +397,14 @@ pub fn thread_exit() -> ! {
     loop {
         core::hint::spin_loop();
     }
+}
+
+pub fn thread_join(tid: u64) -> i64 {
+    unsafe { syscall1(SYS_THREAD_JOIN, tid) as i64 }
+}
+
+pub fn thread_spawn(entry: extern "C" fn(u64) -> !, arg: u64) -> i64 {
+    unsafe { syscall2(SYS_THREAD_SPAWN, entry as usize as u64, arg) as i64 }
 }
 
 pub fn getcwd(out: &mut [u8]) -> i64 {

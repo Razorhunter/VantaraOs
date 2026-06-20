@@ -522,9 +522,9 @@ kepada platform OS yang boleh dibandingkan dengan kernel mainstream secara berpe
   - [x] Tambah QEMU integration test untuk CPU-bound process tanpa cooperative yield.
   - [x] Luluskan QEMU preemption integration test dalam Docker dengan QEMU tersedia.
 - [x] Full register context save/restore.
-- [ ] Thread model awal:
+- [x] Thread model awal:
   - [x] process
-  - [ ] thread
+  - [x] thread
     - [x] Main thread identity per process dengan allocator TID berasingan.
     - [x] Sinkronkan lifecycle process/main-thread dan scheduler handoff.
     - [x] Pindahkan saved context/runtime accounting daripada process ke thread.
@@ -538,16 +538,76 @@ kepada platform OS yang boleh dibandingkan dengan kernel mainstream secara berpe
       - [x] Tambah `SYS_THREAD_EXIT` tanpa menamatkan seluruh process.
       - [x] Track current TID merentas cooperative yield dan timer preemption.
       - [x] Tambah `/bin/threaddemo` QEMU integration smoke.
-      - [ ] Kernel-owned stack allocation dan join/wait primitive.
-  - [ ] kernel task
+      - [x] Tambah blocking `SYS_THREAD_JOIN` dengan wake-on-thread-exit.
+      - [x] Kernel-owned stack allocation.
+        - [x] Sediakan private stack frames per slot tanpa alias shared mapping.
+        - [x] Reserve/clear/reuse stack slot melalui `SYS_THREAD_SPAWN`.
+        - [x] Kekalkan `SYS_THREAD_CREATE` user-supplied stack untuk ABI compatibility.
+  - [x] kernel task
     - [x] Typed kernel-task context dan first-task bootstrap.
     - [x] Buang context-switch entry lama yang tidak selamat/tidak digunakan.
-    - [ ] Satukan kernel task ke scheduler thread sebenar.
-- [ ] IPC primitive awal:
-  - [ ] pipe
-  - [ ] event/wait queue
-  - [ ] message queue placeholder
-- [ ] Signal/job control model yang lebih lengkap.
+    - [x] Satukan identity/lifecycle kernel task ke process `Thread` sebenar.
+    - [x] Gunakan global TID allocator dan TID ready queue untuk kernel task.
+    - [x] Jadikan process table authority untuk state/runtime kernel thread.
+    - [x] Aktifkan live timer-driven context switching antara kernel threads.
+      - [x] Bezakan fresh-entry frame daripada saved CPU interrupt frame.
+      - [x] Tambah QEMU regression yang membuktikan A/B/C dipreempt dan disambung semula.
+    - [x] Tambah preemption-disable guard dan audit semua lock sebelum enable secara default.
+      - [x] Tambah nested `PreemptionGuard` dengan deferred timer preemption.
+      - [x] Ganti kernel mutex dengan `PreemptMutex` yang IRQ/preemption-safe.
+      - [x] Tambah QEMU proof bahawa critical section tidak dipreempt.
+    - [x] Integrasikan kernel-thread scheduler dalam normal boot lifecycle.
+      - [x] Jalankan runtime event loop pada scheduler-owned kernel stack.
+      - [x] Kekalkan A/B/C sebagai feature-only regression workload.
+      - [x] Tambah normal QEMU smoke markers untuk scheduler bootstrap.
+- [x] IPC primitive awal:
+  - [x] pipe
+    - [x] Process-owned read/write descriptor pair.
+    - [x] Bounded FIFO, non-blocking `WouldBlock`, close dan EOF semantics.
+    - [x] Tambah `/bin/pipedemo` thread-to-thread QEMU regression.
+  - [x] event/wait queue
+    - [x] Process-owned auto-reset event handle.
+    - [x] FIFO waiter TID queue dengan saved syscall context.
+    - [x] Block/wake hanya thread pemanggil melalui process-table authority.
+    - [x] Latched signal, close guard, unit tests dan `/bin/eventdemo` regression.
+  - [x] message queue placeholder
+    - [x] Process-owned bounded queue dan fixed message boundary.
+    - [x] Non-blocking empty/full `WouldBlock` semantics.
+    - [x] Reject undersized receive buffer tanpa consume message.
+    - [x] Unit tests dan `/bin/msgdemo` thread-to-thread QEMU regression.
+- [x] Signal/job control model yang lebih lengkap.
+  - [x] Baseline signal/job control:
+    - [x] Implement `SIGTERM` delivery melalui syscall `kill`.
+    - [x] Enforce root/same-UID permission dan lindungi kernel task.
+    - [x] Gunakan conventional signal exit status `128 + signal`.
+    - [x] Cleanup process-owned FD/IPC/address space semasa termination.
+    - [x] Bangunkan parent yang blocked dalam `waitpid`.
+    - [x] Tambah process-table invariant tests dan QEMU background-job regression.
+  - [x] Advanced signal/job control:
+    - [x] Pending signal set dan blocked signal mask.
+      - [x] Process-wide signal bitset dengan `SIG_BLOCK`, `SIG_UNBLOCK`, dan `SIG_SETMASK`.
+      - [x] Queue blocked `SIGTERM` dan expose pending set kepada userland.
+      - [x] Deliver default action apabila pending `SIGTERM` dinyahsekat.
+      - [x] Tambah `/bin/signaldemo`, invariant tests, dan QEMU regression.
+    - [x] User-space signal handlers dan default dispositions.
+      - [x] Tambah `SIG_DFL`, `SIG_IGN`, dan executable handler disposition.
+      - [x] Simpan interrupted context dalam protected per-thread kernel metadata.
+      - [x] Tambah handler dispatch, nested-delivery deferral, dan `sigreturn`.
+      - [x] Extend `/bin/signaldemo`, invariant tests, dan QEMU regression.
+    - [x] Process groups/sessions untuk kawalan job.
+      - [x] Tambah inherited `PGID`/`SID` pada setiap process.
+      - [x] Implement `getpgrp`, `setpgid`, `getsid`, dan `setsid`.
+      - [x] Enforce same-session, child-target, group-leader, dan session-leader guards.
+      - [x] Papar `PGID`/`SID` dalam `/bin/procs`.
+      - [x] Tambah `/bin/jobdemo`, invariant tests, dan QEMU command regression.
+    - [x] Terminal-generated signals seperti `SIGINT` dan `SIGTSTP`.
+      - [x] Detect `Ctrl-C`/`Ctrl-Z` pada PS/2 dan USB keyboard tanpa bocor ke stdin.
+      - [x] Queue terminal control event dari IRQ dan deliver dalam runtime context.
+      - [x] Track foreground job semasa shell blocked dalam `waitpid`.
+      - [x] Default `SIGINT` terminate foreground job dan pulihkan shell.
+      - [x] Tambah `Stopped` lifecycle untuk `SIGTSTP`.
+      - [x] Tambah `SIGCONT` melalui `kill <pid> 18`.
+      - [x] Tambah invariant tests dan QEMU terminal-signal regression.
 
 #### Correctness Consolidation Sprint
 

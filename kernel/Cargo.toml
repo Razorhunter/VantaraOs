@@ -7,6 +7,9 @@ authors = ["Mohammad Hafifi Abu Bakar"]
 description = "Vantara System OS Kernel"
 license = "Apache-2.0 license"
 
+[features]
+kernel-thread-preemption-test = []
+
 [dependencies]
 bootloader = { version = "0.9.23", features = ["map_physical_memory"] }
 volatile = "0.2.6"

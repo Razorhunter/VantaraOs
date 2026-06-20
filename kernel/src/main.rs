@@ -8,35 +8,63 @@
 use alloc::{boxed::Box, rc::Rc, vec, vec::Vec};
 use bootloader::{BootInfo, entry_point};
 use core::panic::PanicInfo;
+use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use kernel::serial_println;
 
 extern crate alloc;
 
-// Test task entry points
+static TASK_A_PROGRESS: AtomicU64 = AtomicU64::new(0);
+static TASK_B_PROGRESS: AtomicU64 = AtomicU64::new(0);
+static RUN_KERNEL_THREAD_TEST: AtomicBool =
+    AtomicBool::new(cfg!(feature = "kernel-thread-preemption-test"));
+
 extern "C" fn task_a() -> ! {
-    loop {
-        serial_println!("[Task A] Running");
-        for _ in 0..100 {
+    kernel::interrupts::without_interrupts(|| serial_println!("[KTHREAD] A started"));
+    {
+        let _guard = kernel::sync::PreemptionGuard::new();
+        let b_before_guard = TASK_B_PROGRESS.load(Ordering::Relaxed);
+        let start_tick = kernel::timer::ticks();
+        while kernel::timer::ticks().saturating_sub(start_tick) < 3 {
+            TASK_A_PROGRESS.fetch_add(1, Ordering::Relaxed);
             core::hint::spin_loop();
         }
+        assert_eq!(
+            TASK_B_PROGRESS.load(Ordering::Relaxed),
+            b_before_guard,
+            "kernel thread switched while preemption was disabled"
+        );
+    }
+    kernel::interrupts::without_interrupts(|| {
+        serial_println!("[KTHREAD] preemption guard passed");
+    });
+    loop {
+        TASK_A_PROGRESS.fetch_add(1, Ordering::Relaxed);
+        core::hint::spin_loop();
     }
 }
 
 extern "C" fn task_b() -> ! {
+    kernel::interrupts::without_interrupts(|| serial_println!("[KTHREAD] B started"));
     loop {
-        serial_println!("[Task B] Running");
-        for _ in 0..100 {
-            core::hint::spin_loop();
-        }
+        TASK_B_PROGRESS.fetch_add(1, Ordering::Relaxed);
+        core::hint::spin_loop();
     }
 }
 
 extern "C" fn task_c() -> ! {
+    kernel::interrupts::without_interrupts(|| serial_println!("[KTHREAD] C started"));
+    let a_before = TASK_A_PROGRESS.load(Ordering::Relaxed);
+    let b_before = TASK_B_PROGRESS.load(Ordering::Relaxed);
+    while TASK_A_PROGRESS.load(Ordering::Relaxed) <= a_before
+        || TASK_B_PROGRESS.load(Ordering::Relaxed) <= b_before
+    {
+        core::hint::spin_loop();
+    }
+    kernel::interrupts::without_interrupts(|| {
+        serial_println!("[KTHREAD] resume cycle passed");
+    });
     loop {
-        serial_println!("[Task C] Running");
-        for _ in 0..100 {
-            core::hint::spin_loop();
-        }
+        core::hint::spin_loop();
     }
 }
 
@@ -68,8 +96,8 @@ fn kernel_main(boot_info: &'static BootInfo) -> ! {
 
     allocator::init_heap(&mut mapper, &mut frame_allocator).expect("heap initialization failed");
     kernel::diagnostics::mark_heap();
-    kernel::scheduler::SCHEDULER.create_idle_task();
     kernel::user::init();
+    kernel::scheduler::SCHEDULER.create_idle_task();
     match kernel::user::ring3::map_first_user_task(&mut mapper, &mut frame_allocator) {
         Ok(()) => serial_println!("[USER] first Ring-3 task image and stack mapped"),
         Err(err) => serial_println!("[USER] first Ring-3 task mapping skipped: {:?}", err),
@@ -123,21 +151,29 @@ fn kernel_main(boot_info: &'static BootInfo) -> ! {
 
     serial_println!("Vantara Kernel is running!");
 
-    // Create test tasks using the scheduler
-    serial_println!("\n[MAIN] Creating test tasks...");
-    let task1_id = kernel::scheduler::SCHEDULER.create_task(task_a);
-    let task2_id = kernel::scheduler::SCHEDULER.create_task(task_b);
-    let task3_id = kernel::scheduler::SCHEDULER.create_task(task_c);
-    kernel::println!("[ok] demo tasks");
+    if RUN_KERNEL_THREAD_TEST.load(Ordering::Relaxed) {
+        serial_println!("\n[MAIN] Creating test tasks...");
+        let task1_id = kernel::scheduler::SCHEDULER.create_task(task_a);
+        let task2_id = kernel::scheduler::SCHEDULER.create_task(task_b);
+        let task3_id = kernel::scheduler::SCHEDULER.create_task(task_c);
+        kernel::println!("[ok] demo tasks");
+        serial_println!("[MAIN] Task IDs: {} {} {}", task1_id, task2_id, task3_id);
 
-    serial_println!("[MAIN] Task IDs: {} {} {}", task1_id, task2_id, task3_id);
+        let (task_count, ready_count) = kernel::scheduler::SCHEDULER.get_stats();
+        serial_println!(
+            "[MAIN] Scheduler stats - Total tasks: {}, Ready tasks: {}",
+            task_count,
+            ready_count
+        );
+        serial_println!("[KTHREAD] starting timer-driven Ring-0 switch test");
+        // SAFETY: all test threads own initialized kernel stacks and synthetic
+        // interrupt frames; this one-way bootstrap intentionally hands control
+        // to the timer-driven kernel scheduler.
+        unsafe {
+            kernel::scheduler::SCHEDULER.start_first_task();
+        }
+    }
 
-    let (task_count, ready_count) = kernel::scheduler::SCHEDULER.get_stats();
-    serial_println!(
-        "[MAIN] Scheduler stats - Total tasks: {}, Ready tasks: {}",
-        task_count,
-        ready_count
-    );
     kernel::shell::init();
 
     kernel::drivers::pci::init();
@@ -153,7 +189,18 @@ fn kernel_main(boot_info: &'static BootInfo) -> ! {
     // Draw initial mouse cursor and update on input events
     kernel::vga_buffer::draw_mouse_cursor(40, 12);
 
-    kernel::runtime::run_event_loop();
+    let runtime_tid =
+        kernel::scheduler::SCHEDULER.create_task(kernel::runtime::kernel_event_thread);
+    serial_println!(
+        "[KTHREAD] normal scheduler starting runtime tid={}",
+        runtime_tid
+    );
+    // SAFETY: boot initialization is complete, the runtime thread owns its
+    // initialized kernel stack, and control intentionally never returns to the
+    // temporary boot stack.
+    unsafe {
+        kernel::scheduler::SCHEDULER.start_first_task();
+    }
 }
 
 #[cfg(not(test))]

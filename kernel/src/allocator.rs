@@ -105,17 +105,17 @@ pub(super) fn record_dealloc(layout: Layout) {
 }
 
 pub struct Locked<A> {
-    inner: spin::Mutex<A>,
+    inner: crate::sync::PreemptMutex<A>,
 }
 
 impl<A> Locked<A> {
     pub const fn new(inner: A) -> Self {
         Locked {
-            inner: spin::Mutex::new(inner),
+            inner: crate::sync::PreemptMutex::new(inner),
         }
     }
 
-    pub fn lock(&self) -> spin::MutexGuard<'_, A> {
+    pub fn lock(&self) -> crate::sync::PreemptMutexGuard<'_, A> {
         self.inner.lock()
     }
 }

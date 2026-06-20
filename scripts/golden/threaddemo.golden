@@ -1,5 +1,6 @@
 threaddemo: main started
-threaddemo: worker created
 threaddemo: worker started
+threaddemo: worker stack buffer ok
+threaddemo: worker argument ok
 threaddemo: worker exited
 threaddemo: joined

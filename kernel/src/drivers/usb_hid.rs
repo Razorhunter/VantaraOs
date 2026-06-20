@@ -2,8 +2,8 @@
 // Handles USB keyboards and mice
 
 use crate::drivers::usb_structs::*;
+use crate::sync::PreemptMutex as Mutex;
 use pc_keyboard::KeyCode;
-use spin::Mutex;
 
 #[repr(u8)]
 pub enum HidClassRequest {
@@ -217,8 +217,8 @@ impl HidInputState {
             }
 
             let mut input = crate::input::INPUT_QUEUE.lock();
-            input.handle_keyboard_key(key, true);
-            if !crate::input::key_emits_terminal_sequence(key) {
+            let terminal_control = input.handle_keyboard_key(key, true);
+            if !terminal_control && !crate::input::key_emits_terminal_sequence(key) {
                 let shift = report.modifier & 0x22 != 0;
                 let ctrl = report.modifier & 0x11 != 0;
                 if let Some(ch) = keycode_to_char(keycode, shift, ctrl, self.caps_lock) {

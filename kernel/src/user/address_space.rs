@@ -1,5 +1,5 @@
+use crate::sync::PreemptMutex as Mutex;
 use core::sync::atomic::{AtomicU64, Ordering};
-use spin::Mutex;
 use x86_64::instructions::tlb;
 use x86_64::{
     PhysAddr, VirtAddr,
@@ -12,6 +12,8 @@ use x86_64::{
 
 const PRIVATE_P4_POOL_SIZE: usize = 8;
 const MAX_PRIVATE_PROGRAM_PAGE_COUNT: usize = 64;
+const PRIVATE_STACK_SLOT_COUNT: usize = crate::user::ring3::USER_STACK_SLOT_COUNT as usize;
+const PRIVATE_STACK_PAGE_COUNT: usize = crate::user::ring3::USER_STACK_PAGE_COUNT as usize;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AddressSpaceKind {
@@ -141,8 +143,8 @@ struct PreparedP4Slot {
     p4_frame: u64,
     program_frames: [u64; MAX_PRIVATE_PROGRAM_PAGE_COUNT],
     program_frame_count: usize,
-    stack_frames: [u64; crate::user::ring3::USER_STACK_PAGE_COUNT as usize],
-    stack_frame_count: usize,
+    stack_frames: [[u64; PRIVATE_STACK_PAGE_COUNT]; PRIVATE_STACK_SLOT_COUNT],
+    stack_in_use: [bool; PRIVATE_STACK_SLOT_COUNT],
     in_use: bool,
 }
 
@@ -151,8 +153,8 @@ impl PreparedP4Slot {
         p4_frame: 0,
         program_frames: [0; MAX_PRIVATE_PROGRAM_PAGE_COUNT],
         program_frame_count: 0,
-        stack_frames: [0; crate::user::ring3::USER_STACK_PAGE_COUNT as usize],
-        stack_frame_count: 0,
+        stack_frames: [[0; PRIVATE_STACK_PAGE_COUNT]; PRIVATE_STACK_SLOT_COUNT],
+        stack_in_use: [false; PRIVATE_STACK_SLOT_COUNT],
         in_use: false,
     };
 }
@@ -208,6 +210,32 @@ impl PrivateP4Pool {
             return false;
         };
         slot.in_use = false;
+        slot.stack_in_use.fill(false);
+        true
+    }
+
+    fn reserve_stack_slot(&mut self, p4_frame: u64, main_stack_top: u64) -> Option<(u64, u64)> {
+        let slot = self.slots[..self.count]
+            .iter_mut()
+            .find(|slot| slot.p4_frame == p4_frame && slot.in_use)?;
+        let main_index = stack_slot_index(main_stack_top)?;
+        slot.stack_in_use[main_index] = true;
+        let index = slot.stack_in_use.iter().position(|in_use| !*in_use)?;
+        slot.stack_in_use[index] = true;
+        Some(stack_range_for_slot(index))
+    }
+
+    fn release_stack_slot(&mut self, p4_frame: u64, stack_top: u64) -> bool {
+        let Some(slot) = self.slots[..self.count]
+            .iter_mut()
+            .find(|slot| slot.p4_frame == p4_frame && slot.in_use)
+        else {
+            return false;
+        };
+        let Some(index) = stack_slot_index(stack_top) else {
+            return false;
+        };
+        slot.stack_in_use[index] = false;
         true
     }
 }
@@ -263,6 +291,62 @@ pub fn release_prepared_p4_frame(p4_frame: u64) -> bool {
         crate::serial_println!("[USER] released private P4 frame {:#x}", p4_frame);
     }
     released
+}
+
+pub fn reserve_private_thread_stack(p4_frame: u64, main_stack_top: u64) -> Option<(u64, u64)> {
+    let range = PRIVATE_P4_POOL
+        .lock()
+        .reserve_stack_slot(p4_frame, main_stack_top)?;
+    if clear_private_thread_stack(p4_frame, range.1).is_err() {
+        let _ = release_private_thread_stack(p4_frame, range.1);
+        return None;
+    }
+    Some(range)
+}
+
+pub fn release_private_thread_stack(p4_frame: u64, stack_top: u64) -> bool {
+    PRIVATE_P4_POOL
+        .lock()
+        .release_stack_slot(p4_frame, stack_top)
+}
+
+fn clear_private_thread_stack(p4_frame: u64, stack_top: u64) -> Result<(), AddressSpaceError> {
+    let physical_memory_offset = physical_memory_offset()?;
+    let pool = PRIVATE_P4_POOL.lock();
+    let slot = pool.slots[..pool.count]
+        .iter()
+        .find(|slot| slot.p4_frame == p4_frame && slot.in_use)
+        .ok_or(AddressSpaceError::PrivateMappingNotFound)?;
+    let stack_slot =
+        stack_slot_index(stack_top).ok_or(AddressSpaceError::PrivateMappingNotFound)?;
+    for frame in slot.stack_frames[stack_slot] {
+        let destination = (physical_memory_offset + frame).as_mut_ptr::<u8>();
+        // SAFETY: every address comes from a live private stack frame owned by
+        // this prepared P4 slot, and the boot physical-memory mapping spans
+        // the complete 4 KiB frame.
+        unsafe {
+            core::ptr::write_bytes(destination, 0, Size4KiB::SIZE as usize);
+        }
+    }
+    Ok(())
+}
+
+fn stack_range_for_slot(index: usize) -> (u64, u64) {
+    let stack_top = crate::user::ring3::FIRST_USER_STACK_TOP
+        - index as u64 * crate::user::ring3::USER_STACK_SLOT_SIZE;
+    (stack_top - crate::user::ring3::USER_STACK_SIZE, stack_top)
+}
+
+fn stack_slot_index(stack_top: u64) -> Option<usize> {
+    if stack_top > crate::user::ring3::FIRST_USER_STACK_TOP {
+        return None;
+    }
+    let offset = crate::user::ring3::FIRST_USER_STACK_TOP - stack_top;
+    if offset % crate::user::ring3::USER_STACK_SLOT_SIZE != 0 {
+        return None;
+    }
+    let index = (offset / crate::user::ring3::USER_STACK_SLOT_SIZE) as usize;
+    (index < PRIVATE_STACK_SLOT_COUNT).then_some(index)
 }
 
 pub fn active_p4_frame() -> u64 {
@@ -515,8 +599,9 @@ pub unsafe fn prepare_process_private_memory(
 
     let stack_page_count =
         pages_for_len(layout.stack_top.saturating_sub(layout.stack_start) as usize);
-
-    if stack_page_count > slot.stack_frame_count {
+    let stack_slot =
+        stack_slot_index(layout.stack_top).ok_or(AddressSpaceError::PrivateMappingNotFound)?;
+    if stack_page_count > PRIVATE_STACK_PAGE_COUNT {
         return Err(AddressSpaceError::PrivateMappingTooSmall);
     }
 
@@ -537,7 +622,7 @@ pub unsafe fn prepare_process_private_memory(
                 physical_memory_offset,
                 PhysFrame::containing_address(PhysAddr::new(p4_frame)),
                 VirtAddr::new(layout.stack_start + (index as u64 * Size4KiB::SIZE)),
-                PhysFrame::containing_address(PhysAddr::new(slot.stack_frames[index])),
+                PhysFrame::containing_address(PhysAddr::new(slot.stack_frames[stack_slot][index])),
             )?;
         }
     }
@@ -558,7 +643,7 @@ pub unsafe fn prepare_process_private_memory(
 
     for index in 0..stack_page_count {
         let stack_destination =
-            (physical_memory_offset + slot.stack_frames[index]).as_mut_ptr::<u8>();
+            (physical_memory_offset + slot.stack_frames[stack_slot][index]).as_mut_ptr::<u8>();
         unsafe {
             core::ptr::write_bytes(stack_destination, 0, Size4KiB::SIZE as usize);
         }
@@ -574,6 +659,16 @@ pub unsafe fn prepare_process_private_memory(
             layout,
             image,
         )?;
+    }
+
+    drop(pool);
+    let mut pool = PRIVATE_P4_POOL.lock();
+    let count = pool.count;
+    if let Some(slot) = pool.slots[..count]
+        .iter_mut()
+        .find(|slot| slot.p4_frame == p4_frame)
+    {
+        slot.stack_in_use[stack_slot] = true;
     }
 
     Ok(())
@@ -819,14 +914,17 @@ unsafe fn write_private_user_stack_bytes(
     mut virtual_address: u64,
     mut bytes: &[u8],
 ) -> Result<(), AddressSpaceError> {
+    let stack_slot =
+        stack_slot_index(layout.stack_top).ok_or(AddressSpaceError::PrivateMappingNotFound)?;
     while !bytes.is_empty() {
-        let page_index = private_stack_page_index(virtual_address, layout, slot)?;
+        let page_index = private_stack_page_index(virtual_address, layout)?;
         let page_offset = (virtual_address - layout.stack_start) % Size4KiB::SIZE;
         let count = bytes
             .len()
             .min(Size4KiB::SIZE as usize - page_offset as usize);
-        let destination = (physical_memory_offset + slot.stack_frames[page_index] + page_offset)
-            .as_mut_ptr::<u8>();
+        let destination =
+            (physical_memory_offset + slot.stack_frames[stack_slot][page_index] + page_offset)
+                .as_mut_ptr::<u8>();
         unsafe {
             core::ptr::copy_nonoverlapping(bytes.as_ptr(), destination, count);
         }
@@ -855,13 +953,12 @@ fn private_program_page_index(
 fn private_stack_page_index(
     virtual_address: u64,
     layout: crate::user::ring3::UserMemoryLayout,
-    slot: &PreparedP4Slot,
 ) -> Result<usize, AddressSpaceError> {
     if virtual_address < layout.stack_start || virtual_address >= layout.stack_top {
         return Err(AddressSpaceError::PrivateMappingNotFound);
     }
     let index = ((virtual_address - layout.stack_start) / Size4KiB::SIZE) as usize;
-    if index >= slot.stack_frame_count {
+    if index >= PRIVATE_STACK_PAGE_COUNT {
         return Err(AddressSpaceError::PrivateMappingTooSmall);
     }
     Ok(index)
@@ -932,24 +1029,24 @@ unsafe fn prepare_private_p4_slot(
         *frame_addr = private_frame.start_address().as_u64();
     }
 
-    let mut stack_frames = [0u64; crate::user::ring3::USER_STACK_PAGE_COUNT as usize];
-    for (index, frame_addr) in stack_frames.iter_mut().enumerate() {
-        let stack_frame = frame_allocator
-            .allocate_frame()
-            .ok_or(AddressSpaceError::FrameAllocationFailed)?;
-        unsafe {
-            map_private_user_page(
-                physical_memory_offset,
-                p4_frame,
-                VirtAddr::new(
-                    crate::user::ring3::FIRST_USER_STACK_TOP - crate::user::ring3::USER_STACK_SIZE
-                        + (index as u64 * Size4KiB::SIZE),
-                ),
-                stack_frame,
-                frame_allocator,
-            )?;
+    let mut stack_frames = [[0u64; PRIVATE_STACK_PAGE_COUNT]; PRIVATE_STACK_SLOT_COUNT];
+    for (slot_index, slot_frames) in stack_frames.iter_mut().enumerate() {
+        let (stack_start, _) = stack_range_for_slot(slot_index);
+        for (page_index, frame_addr) in slot_frames.iter_mut().enumerate() {
+            let stack_frame = frame_allocator
+                .allocate_frame()
+                .ok_or(AddressSpaceError::FrameAllocationFailed)?;
+            unsafe {
+                map_private_user_page(
+                    physical_memory_offset,
+                    p4_frame,
+                    VirtAddr::new(stack_start + page_index as u64 * Size4KiB::SIZE),
+                    stack_frame,
+                    frame_allocator,
+                )?;
+            }
+            *frame_addr = stack_frame.start_address().as_u64();
         }
-        *frame_addr = stack_frame.start_address().as_u64();
     }
 
     Ok(PreparedP4Slot {
@@ -957,7 +1054,7 @@ unsafe fn prepare_private_p4_slot(
         program_frames,
         program_frame_count: program_page_count,
         stack_frames,
-        stack_frame_count: crate::user::ring3::USER_STACK_PAGE_COUNT as usize,
+        stack_in_use: [false; PRIVATE_STACK_SLOT_COUNT],
         in_use: false,
     })
 }
@@ -1200,5 +1297,24 @@ mod tests {
         assert_eq!(pool.take(), None);
         assert!(pool.release(0x2000));
         assert_eq!(pool.take(), Some(0x2000));
+    }
+
+    #[test_case]
+    fn private_p4_pool_reserves_and_reuses_non_main_stack_slots() {
+        let mut pool = PrivateP4Pool::new();
+        let mut slot = PreparedP4Slot::EMPTY;
+        slot.p4_frame = 0x2000;
+        slot.in_use = true;
+        assert!(pool.push(slot));
+
+        let main_top = crate::user::ring3::stack_top_for_pid(5);
+        let first = pool.reserve_stack_slot(0x2000, main_top).unwrap();
+        assert_ne!(first.1, main_top);
+        assert!(pool.release_stack_slot(0x2000, first.1));
+        assert_eq!(
+            pool.reserve_stack_slot(0x2000, main_top),
+            Some(first),
+            "released stack slot should be reused"
+        );
     }
 }

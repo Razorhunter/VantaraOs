@@ -3,8 +3,6 @@
 
 use core::panic::PanicInfo;
 
-const SIGTERM: u64 = 15;
-
 #[allow(dead_code)]
 mod abi {
     include!("../src/abi.rs");
@@ -12,23 +10,38 @@ mod abi {
 
 #[unsafe(no_mangle)]
 pub extern "C" fn _start() -> ! {
-    let Some(arg) = abi::first_arg() else {
-        abi::write("usage: kill <pid>\n");
+    let mut args = abi::argv();
+    let Some(arg) = args.next_arg() else {
+        abi::write("usage: kill <pid> [signal]\n");
         abi::exit(1);
     };
 
     let Some(pid) = parse_u64(arg) else {
-        abi::write("usage: kill <pid>\n");
+        abi::write("usage: kill <pid> [signal]\n");
         abi::exit(1);
     };
+    let signal = match args.next_arg() {
+        Some(value) => match parse_u64(value) {
+            Some(signal) => signal,
+            None => {
+                abi::write("usage: kill <pid> [signal]\n");
+                abi::exit(1);
+            }
+        },
+        None => abi::SIGTERM,
+    };
 
-    let ret = abi::kill(pid, SIGTERM);
+    let ret = abi::kill(pid, signal);
     if ret < 0 {
         abi::write("kill: failed\n");
         abi::exit(1);
     }
 
-    abi::write("kill: signal queued\n");
+    if ret == 1 {
+        abi::write("kill: signal pending\n");
+    } else {
+        abi::write("kill: signal delivered\n");
+    }
     abi::exit(0);
 }
 

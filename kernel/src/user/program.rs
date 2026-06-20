@@ -1,6 +1,6 @@
+use crate::sync::PreemptMutex as Mutex;
 use alloc::collections::VecDeque;
 use lazy_static::lazy_static;
-use spin::Mutex;
 use x86_64::VirtAddr;
 
 static USER_SHELL_RESPAWN: Mutex<bool> = Mutex::new(false);
@@ -161,6 +161,7 @@ pub fn request_user_shell_wait(
     shell_pid: crate::user::process::Pid,
     child_pid: crate::user::process::Pid,
 ) {
+    crate::user::process::set_terminal_foreground_job(child_pid);
     USER_SHELL_WAIT_REQUESTED
         .lock()
         .push_back(UserShellWaitRequest {

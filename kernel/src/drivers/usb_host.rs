@@ -4,9 +4,9 @@ use crate::drivers::usb_descriptor::{
     DescriptorIter, ParsedDescriptor, UsbDescriptorError, parse_device_descriptor,
 };
 use crate::drivers::usb_structs::*;
+use crate::sync::PreemptMutex as Mutex;
 use alloc::vec::Vec;
 use lazy_static::lazy_static;
-use spin::Mutex;
 use x86_64::instructions::port::Port;
 
 pub const UHCI_MAX_DEVICES: usize = 127;

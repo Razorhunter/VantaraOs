@@ -1,7 +1,7 @@
+use crate::sync::PreemptMutex as Mutex;
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use lazy_static::lazy_static;
-use spin::Mutex;
 
 use crate::user::address_space::AddressSpace;
 use crate::user::thread::{Thread, ThreadKind, ThreadState, ThreadStore, Tid};
@@ -9,6 +9,13 @@ use crate::user::thread::{Thread, ThreadKind, ThreadState, ThreadStore, Tid};
 pub type Pid = u32;
 pub const DEFAULT_REAPED_HISTORY_LIMIT: usize = 16;
 pub const USERNAME_MAX_LEN: usize = 16;
+pub const SIGTERM: u64 = 15;
+pub const SIGCONT: u64 = 18;
+pub const SIGTSTP: u64 = 20;
+pub const SIGINT: u64 = 2;
+pub const SIGTERM_MASK: u64 = 1 << (SIGTERM - 1);
+pub const SIG_DFL: u64 = 0;
+pub const SIG_IGN: u64 = 1;
 const USER_PREEMPT_QUANTUM_TICKS: u64 = 10;
 static CURRENT_USER_PID_ATOMIC: AtomicU32 = AtomicU32::new(0);
 static CURRENT_USER_TID_ATOMIC: AtomicU32 = AtomicU32::new(0);
@@ -17,6 +24,7 @@ static TIMER_PREEMPT_REQUESTS: AtomicU64 = AtomicU64::new(0);
 static TIMER_PREEMPT_YIELDS: AtomicU64 = AtomicU64::new(0);
 static TIMER_PREEMPT_PENDING: AtomicBool = AtomicBool::new(false);
 static LAST_PREEMPT_REQUEST_TICK: AtomicU64 = AtomicU64::new(0);
+static TERMINAL_FOREGROUND_PID: AtomicU32 = AtomicU32::new(0);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ProcessState {
@@ -24,6 +32,7 @@ pub enum ProcessState {
     Ready,
     Running,
     Blocked,
+    Stopped,
     Exited,
     Zombie,
     Reaped,
@@ -44,6 +53,8 @@ pub struct FileHandle {
 pub struct Process {
     pub pid: Pid,
     pub parent_pid: Option<Pid>,
+    pub process_group_id: Pid,
+    pub session_id: Pid,
     pub name: &'static str,
     pub program_path: &'static str,
     pub kind: ProcessKind,
@@ -58,6 +69,9 @@ pub struct Process {
     pub exit_status: Option<u64>,
     pub waiting_for: Option<Pid>,
     pub sleeping_until_tick: Option<u64>,
+    pub pending_signals: u64,
+    pub blocked_signals: u64,
+    pub sigterm_disposition: u64,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -119,6 +133,17 @@ fn trim_ascii_spaces(bytes: &[u8]) -> &[u8] {
     &bytes[start..end]
 }
 
+pub const fn signal_bit(signal: u64) -> Option<u64> {
+    if signal == 0 || signal > 64 {
+        return None;
+    }
+    Some(1 << (signal - 1))
+}
+
+fn lowest_signal(mask: u64) -> Option<u64> {
+    (mask != 0).then(|| u64::from(mask.trailing_zeros()) + 1)
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ProcessStats {
     pub process_count: usize,
@@ -174,6 +199,90 @@ pub struct UserExceptionReport {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SignalTerminationReport {
+    pub pid: Pid,
+    pub name: &'static str,
+    pub parent_pid: Option<Pid>,
+    pub job_mode: crate::user::program::JobMode,
+    pub status: u64,
+    pub parent_woken: bool,
+    pub p4_frame: Option<u64>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SignalTerminationError {
+    Missing,
+    PermissionDenied,
+    KernelTask,
+    AlreadyExited,
+    SelfTarget,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SignalDelivery {
+    Pending {
+        pid: Pid,
+        name: &'static str,
+        signal: u64,
+        pending_signals: u64,
+    },
+    Handled {
+        pid: Pid,
+        name: &'static str,
+        signal: u64,
+        handler: u64,
+    },
+    Ignored {
+        pid: Pid,
+        name: &'static str,
+        signal: u64,
+    },
+    Terminated(SignalTerminationReport),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SignalMaskHow {
+    Block,
+    Unblock,
+    SetMask,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ProcessGroupError {
+    Missing,
+    NotChild,
+    DifferentSession,
+    SessionLeader,
+    GroupMissing,
+    GroupLeader,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SignalMaskUpdate {
+    pub old_mask: u64,
+    pub new_mask: u64,
+    pub delivered_signal: Option<u64>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SignalHandlerReport {
+    pub pid: Pid,
+    pub tid: Tid,
+    pub signal: u64,
+    pub handler: u64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TerminalSignalReport {
+    pub pid: Pid,
+    pub name: &'static str,
+    pub signal: u64,
+    pub status: u64,
+    pub stopped: bool,
+    pub parent_woken: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum UserFaultKind {
     Null,
     KernelSpace,
@@ -185,8 +294,10 @@ pub enum UserFaultKind {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct BlockedUserReport {
     pub pid: Pid,
+    pub tid: Tid,
     pub name: &'static str,
     pub waiting_for: Option<Pid>,
+    pub waiting_for_thread: Option<Tid>,
     pub resume_context: Option<UserResumeContext>,
 }
 
@@ -222,6 +333,17 @@ pub enum WaitTargetStatus {
     NotChild { actual_parent: Option<Pid> },
     NotExited { state: ProcessState },
     Reapable,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ThreadJoinStatus {
+    Missing,
+    NotSibling,
+    SelfJoin,
+    Deadlock,
+    AlreadyReaped,
+    Completed,
+    Blocked,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -358,6 +480,12 @@ impl Process {
             .any(|thread| thread.state == ThreadState::Blocked)
         {
             ProcessState::Blocked
+        } else if self
+            .threads
+            .values()
+            .any(|thread| thread.state == ThreadState::Stopped)
+        {
+            ProcessState::Stopped
         } else {
             ProcessState::Created
         };
@@ -370,6 +498,7 @@ const fn thread_state_for_process(state: ProcessState) -> ThreadState {
         ProcessState::Ready => ThreadState::Ready,
         ProcessState::Running => ThreadState::Running,
         ProcessState::Blocked => ThreadState::Blocked,
+        ProcessState::Stopped => ThreadState::Stopped,
         ProcessState::Exited => ThreadState::Exited,
         ProcessState::Zombie => ThreadState::Zombie,
         ProcessState::Reaped => ThreadState::Reaped,
@@ -572,6 +701,15 @@ impl ProcessTable {
         let credentials = parent_pid
             .and_then(|pid| self.processes.get(&pid).map(|process| process.credentials))
             .unwrap_or_else(ProcessCredentials::root);
+        let parent_job = parent_pid.and_then(|pid| {
+            self.processes
+                .get(&pid)
+                .map(|process| (process.kind, process.process_group_id, process.session_id))
+        });
+        let (process_group_id, session_id) = match parent_job {
+            Some((ProcessKind::UserProcess, pgid, sid)) => (pgid, sid),
+            _ => (pid, pid),
+        };
         let thread_kind = match kind {
             ProcessKind::KernelTask => ThreadKind::Kernel,
             ProcessKind::UserProcess => ThreadKind::User,
@@ -583,6 +721,8 @@ impl ProcessTable {
             Process {
                 pid,
                 parent_pid,
+                process_group_id,
+                session_id,
                 name,
                 program_path,
                 kind,
@@ -602,12 +742,85 @@ impl ProcessTable {
                 exit_status: None,
                 waiting_for: None,
                 sleeping_until_tick: None,
+                pending_signals: 0,
+                blocked_signals: 0,
+                sigterm_disposition: SIG_DFL,
             },
         );
     }
 
     pub fn credentials_for(&self, pid: Pid) -> Option<ProcessCredentials> {
         self.processes.get(&pid).map(|process| process.credentials)
+    }
+
+    pub fn process_group_id(&self, pid: Pid) -> Option<Pid> {
+        self.processes
+            .get(&pid)
+            .map(|process| process.process_group_id)
+    }
+
+    pub fn session_id(&self, pid: Pid) -> Option<Pid> {
+        self.processes.get(&pid).map(|process| process.session_id)
+    }
+
+    pub fn set_process_group(
+        &mut self,
+        caller_pid: Pid,
+        target_pid: Pid,
+        process_group_id: Pid,
+    ) -> Result<Pid, ProcessGroupError> {
+        let caller = self
+            .processes
+            .get(&caller_pid)
+            .ok_or(ProcessGroupError::Missing)?;
+        let caller_session = caller.session_id;
+        let target = self
+            .processes
+            .get(&target_pid)
+            .ok_or(ProcessGroupError::Missing)?;
+        if target_pid != caller_pid && target.parent_pid != Some(caller_pid) {
+            return Err(ProcessGroupError::NotChild);
+        }
+        if target.session_id != caller_session {
+            return Err(ProcessGroupError::DifferentSession);
+        }
+        if target.session_id == target.pid {
+            return Err(ProcessGroupError::SessionLeader);
+        }
+
+        let process_group_id = if process_group_id == 0 {
+            target_pid
+        } else {
+            process_group_id
+        };
+        if process_group_id != target_pid
+            && !self.processes.values().any(|process| {
+                process.session_id == caller_session && process.process_group_id == process_group_id
+            })
+        {
+            return Err(ProcessGroupError::GroupMissing);
+        }
+
+        let target = self
+            .processes
+            .get_mut(&target_pid)
+            .expect("validated process-group target must remain present");
+        target.process_group_id = process_group_id;
+        Ok(process_group_id)
+    }
+
+    pub fn create_session(&mut self, pid: Pid) -> Result<Pid, ProcessGroupError> {
+        let process = self.processes.get(&pid).ok_or(ProcessGroupError::Missing)?;
+        if process.process_group_id == pid {
+            return Err(ProcessGroupError::GroupLeader);
+        }
+        let process = self
+            .processes
+            .get_mut(&pid)
+            .expect("validated session target must remain present");
+        process.session_id = pid;
+        process.process_group_id = pid;
+        Ok(pid)
     }
 
     pub fn create_thread(&mut self, pid: Pid) -> Option<Tid> {
@@ -621,6 +834,58 @@ impl ProcessTable {
             .threads
             .insert(Thread::new(tid, pid, kind))
             .then_some(tid)
+    }
+
+    pub fn create_kernel_thread(&mut self) -> Option<Tid> {
+        let pid = self
+            .processes
+            .values()
+            .find(|process| process.kind == ProcessKind::KernelTask)?
+            .pid;
+        let tid = self.reserve_tid();
+        let process = self.processes.get_mut(&pid)?;
+        let mut thread = Thread::new(tid, pid, ThreadKind::Kernel);
+        thread.state = ThreadState::Ready;
+        if !process.threads.insert(thread) {
+            return None;
+        }
+        process.refresh_state_from_threads();
+        Some(tid)
+    }
+
+    pub fn set_kernel_thread_state(&mut self, tid: Tid, state: ThreadState) -> bool {
+        let Some(process) = self.processes.get_by_tid_mut(tid) else {
+            return false;
+        };
+        if process.kind != ProcessKind::KernelTask {
+            return false;
+        }
+        let Some(thread) = process.threads.get_mut(tid) else {
+            return false;
+        };
+        if thread.state == ThreadState::Running && state != ThreadState::Running {
+            stop_thread_run(thread);
+        }
+        if state == ThreadState::Running {
+            thread.context_switches = thread.context_switches.saturating_add(1);
+            thread.last_started_tick = Some(crate::timer::ticks());
+        }
+        thread.state = state;
+        process.refresh_state_from_threads();
+        true
+    }
+
+    pub fn kernel_thread_state(&self, tid: Tid) -> Option<ThreadState> {
+        let process = self.processes.get_by_tid(tid)?;
+        (process.kind == ProcessKind::KernelTask)
+            .then(|| process.threads.get(tid).map(|thread| thread.state))
+            .flatten()
+    }
+
+    pub fn kernel_thread_runtime_ticks(&self, tid: Tid) -> Option<u64> {
+        let process = self.processes.get_by_tid(tid)?;
+        let thread = process.threads.get(tid)?;
+        (process.kind == ProcessKind::KernelTask).then_some(thread.runtime_ticks)
     }
 
     pub fn create_user_thread(
@@ -661,6 +926,40 @@ impl ProcessTable {
         Some(tid)
     }
 
+    pub fn create_managed_user_thread(&mut self, pid: Pid, entry: u64, arg: u64) -> Option<Tid> {
+        let process = self.processes.get(&pid)?;
+        if process.kind != ProcessKind::UserProcess {
+            return None;
+        }
+        let p4_frame = process.address_space.p4_frame?;
+        let (stack_start, stack_top) = crate::user::address_space::reserve_private_thread_stack(
+            p4_frame,
+            process.address_space.layout.stack_top,
+        )?;
+        let initial_rsp = (stack_top & !0xf).checked_sub(8)?;
+
+        let tid = self.reserve_tid();
+        let process = self.processes.get_mut(&pid)?;
+        let mut thread = Thread::new(tid, pid, ThreadKind::User)
+            .with_user_stack(stack_start, stack_top)
+            .with_kernel_managed_stack();
+        thread.state = ThreadState::Ready;
+        thread.resume_context = Some(UserResumeContext {
+            rip: entry,
+            rsp: initial_rsp,
+            rflags: 0x202,
+            rdi: arg,
+            ..UserResumeContext::EMPTY
+        });
+        if !process.threads.insert(thread) {
+            let _ = crate::user::address_space::release_private_thread_stack(p4_frame, stack_top);
+            return None;
+        }
+        process.refresh_state_from_threads();
+        self.enqueue_ready(tid);
+        Some(tid)
+    }
+
     pub fn mark_thread_exited(&mut self, tid: Tid) -> Option<Pid> {
         let process = self.processes.get_by_tid_mut(tid)?;
         if tid == process.main_tid() {
@@ -670,10 +969,151 @@ impl ProcessTable {
         stop_thread_run(thread);
         thread.state = ThreadState::Exited;
         thread.resume_context = None;
+        thread.waiting_for = None;
+
+        let mut woken = Vec::new();
+        for waiter in process.threads.values_mut() {
+            if waiter.state == ThreadState::Blocked && waiter.waiting_for == Some(tid) {
+                waiter.waiting_for = None;
+                waiter.state = ThreadState::Ready;
+                if let Some(context) = waiter.resume_context.as_mut() {
+                    context.rax = 0;
+                }
+                woken.push(waiter.tid);
+            }
+        }
+        let reaped_stack = if !woken.is_empty() {
+            process
+                .threads
+                .get_mut(tid)
+                .expect("exiting thread must remain in its process")
+                .state = ThreadState::Reaped;
+            take_managed_stack_release(process, tid)
+        } else {
+            None
+        };
         process.refresh_state_from_threads();
         let pid = process.pid;
         self.ready_queue.retain(|queued_tid| *queued_tid != tid);
+        for waiter_tid in woken {
+            self.enqueue_ready(waiter_tid);
+        }
+        if let Some((p4_frame, stack_top)) = reaped_stack {
+            let _ = crate::user::address_space::release_private_thread_stack(p4_frame, stack_top);
+        }
         Some(pid)
+    }
+
+    pub fn join_thread(
+        &mut self,
+        caller_tid: Tid,
+        target_tid: Tid,
+        resume_context: UserResumeContext,
+    ) -> ThreadJoinStatus {
+        if caller_tid == target_tid {
+            return ThreadJoinStatus::SelfJoin;
+        }
+
+        let Some(caller_pid) = self
+            .processes
+            .get_by_tid(caller_tid)
+            .map(|process| process.pid)
+        else {
+            return ThreadJoinStatus::Missing;
+        };
+        let Some(target_process) = self.processes.get_by_tid(target_tid) else {
+            return ThreadJoinStatus::Missing;
+        };
+        if target_process.pid != caller_pid {
+            return ThreadJoinStatus::NotSibling;
+        }
+        let target_state = target_process
+            .threads
+            .get(target_tid)
+            .map(|thread| thread.state)
+            .expect("TID lookup must resolve inside its owning process");
+        if target_state == ThreadState::Reaped {
+            return ThreadJoinStatus::AlreadyReaped;
+        }
+        if target_process
+            .threads
+            .get(target_tid)
+            .is_some_and(|thread| thread.waiting_for == Some(caller_tid))
+        {
+            return ThreadJoinStatus::Deadlock;
+        }
+
+        let process = self
+            .processes
+            .get_mut(&caller_pid)
+            .expect("caller process must remain present");
+        if target_state == ThreadState::Exited {
+            process
+                .threads
+                .get_mut(target_tid)
+                .expect("target thread must remain present")
+                .state = ThreadState::Reaped;
+            if let Some((p4_frame, stack_top)) = take_managed_stack_release(process, target_tid) {
+                let _ =
+                    crate::user::address_space::release_private_thread_stack(p4_frame, stack_top);
+            }
+            return ThreadJoinStatus::Completed;
+        }
+
+        let caller = process
+            .threads
+            .get_mut(caller_tid)
+            .expect("caller thread must remain present");
+        if caller.state != ThreadState::Running {
+            return ThreadJoinStatus::Missing;
+        }
+        stop_thread_run(caller);
+        caller.state = ThreadState::Blocked;
+        caller.waiting_for = Some(target_tid);
+        caller.resume_context = Some(resume_context);
+        process.refresh_state_from_threads();
+        ThreadJoinStatus::Blocked
+    }
+
+    pub fn block_thread(&mut self, tid: Tid, resume_context: UserResumeContext) -> bool {
+        let Some(process) = self.processes.get_by_tid_mut(tid) else {
+            return false;
+        };
+        let Some(thread) = process.threads.get_mut(tid) else {
+            return false;
+        };
+        if thread.state != ThreadState::Running {
+            return false;
+        }
+
+        stop_thread_run(thread);
+        thread.state = ThreadState::Blocked;
+        thread.waiting_for = None;
+        thread.resume_context = Some(resume_context);
+        process.refresh_state_from_threads();
+        true
+    }
+
+    pub fn wake_thread(&mut self, tid: Tid, return_value: u64) -> bool {
+        let Some(process) = self.processes.get_by_tid_mut(tid) else {
+            return false;
+        };
+        let Some(thread) = process.threads.get_mut(tid) else {
+            return false;
+        };
+        if thread.state != ThreadState::Blocked {
+            return false;
+        }
+
+        let Some(context) = thread.resume_context.as_mut() else {
+            return false;
+        };
+        context.rax = return_value;
+        thread.waiting_for = None;
+        thread.state = ThreadState::Ready;
+        process.refresh_state_from_threads();
+        self.enqueue_ready(tid);
+        true
     }
 
     pub fn thread(&self, tid: Tid) -> Option<&Thread> {
@@ -718,6 +1158,378 @@ impl ProcessTable {
             };
             process.set_state(state);
         }
+    }
+
+    pub fn stop_user_process(&mut self, pid: Pid, signal: u64) -> Option<TerminalSignalReport> {
+        self.remove_from_ready_queue(pid);
+        let process = self.processes.get_mut(&pid)?;
+        if process.kind != ProcessKind::UserProcess
+            || matches!(
+                process.state,
+                ProcessState::Exited
+                    | ProcessState::Zombie
+                    | ProcessState::Reaped
+                    | ProcessState::Stopped
+            )
+        {
+            return None;
+        }
+        stop_process_run(process);
+        process.sleeping_until_tick = None;
+        process.set_state(ProcessState::Stopped);
+        let parent_pid = process.parent_pid;
+        let name = process.name;
+        let status = 128 + signal;
+
+        let mut parent_woken = false;
+        if let Some(parent_pid) = parent_pid {
+            let parent_tid = self.processes.get(&parent_pid).map(Process::main_tid);
+            if let Some(parent) = self.processes.get_mut(&parent_pid) {
+                if parent.state == ProcessState::Blocked && parent.waiting_for == Some(pid) {
+                    parent.waiting_for = None;
+                    if let Some(context) = parent.main_thread_mut().resume_context.as_mut() {
+                        context.rax = status;
+                    }
+                    parent.set_state(ProcessState::Ready);
+                    if let Some(parent_tid) = parent_tid {
+                        self.enqueue_ready(parent_tid);
+                    }
+                    parent_woken = true;
+                }
+            }
+        }
+
+        Some(TerminalSignalReport {
+            pid,
+            name,
+            signal,
+            status,
+            stopped: true,
+            parent_woken,
+        })
+    }
+
+    pub fn continue_user_process(&mut self, caller_pid: Pid, pid: Pid) -> bool {
+        let Some(caller_credentials) = self
+            .processes
+            .get(&caller_pid)
+            .map(|process| process.credentials)
+        else {
+            return false;
+        };
+        let tid = {
+            let Some(process) = self.processes.get_mut(&pid) else {
+                return false;
+            };
+            if caller_credentials.uid != 0 && caller_credentials.uid != process.credentials.uid {
+                return false;
+            }
+            if process.state != ProcessState::Stopped {
+                return false;
+            }
+            process.set_state(ProcessState::Ready);
+            process.main_tid()
+        };
+        self.enqueue_ready(tid);
+        true
+    }
+
+    pub fn terminate_user_process(
+        &mut self,
+        caller_pid: Pid,
+        target_pid: Pid,
+        status: u64,
+    ) -> Result<SignalTerminationReport, SignalTerminationError> {
+        if caller_pid == target_pid {
+            return Err(SignalTerminationError::SelfTarget);
+        }
+
+        let caller_credentials = self
+            .processes
+            .get(&caller_pid)
+            .map(|process| process.credentials)
+            .ok_or(SignalTerminationError::Missing)?;
+        let target = self
+            .processes
+            .get(&target_pid)
+            .ok_or(SignalTerminationError::Missing)?;
+        if target.kind != ProcessKind::UserProcess {
+            return Err(SignalTerminationError::KernelTask);
+        }
+        if matches!(
+            target.state,
+            ProcessState::Exited | ProcessState::Zombie | ProcessState::Reaped
+        ) {
+            return Err(SignalTerminationError::AlreadyExited);
+        }
+        if caller_credentials.uid != 0 && caller_credentials.uid != target.credentials.uid {
+            return Err(SignalTerminationError::PermissionDenied);
+        }
+
+        let name = target.name;
+        let parent_pid = target.parent_pid;
+        let job_mode = target.job_mode;
+        let p4_frame = target.address_space.p4_frame;
+        self.mark_exited(target_pid, status);
+
+        let mut parent_woken = false;
+        if let Some(parent_pid) = parent_pid {
+            let waiting = self.processes.get(&parent_pid).is_some_and(|parent| {
+                parent.state == ProcessState::Blocked && parent.waiting_for == Some(target_pid)
+            });
+            if waiting {
+                if let Some(target) = self.processes.get_mut(&target_pid) {
+                    target.set_state(ProcessState::Reaped);
+                }
+                let parent_tid = self.processes.get(&parent_pid).map(Process::main_tid);
+                if let Some(parent) = self.processes.get_mut(&parent_pid) {
+                    parent.waiting_for = None;
+                    parent.sleeping_until_tick = None;
+                    if let Some(context) = parent.main_thread_mut().resume_context.as_mut() {
+                        context.rax = status;
+                    }
+                    parent.set_state(ProcessState::Ready);
+                }
+                if let Some(parent_tid) = parent_tid {
+                    self.enqueue_ready(parent_tid);
+                }
+                parent_woken = true;
+            }
+        }
+
+        Ok(SignalTerminationReport {
+            pid: target_pid,
+            name,
+            parent_pid,
+            job_mode,
+            status,
+            parent_woken,
+            p4_frame,
+        })
+    }
+
+    pub fn send_signal(
+        &mut self,
+        caller_pid: Pid,
+        target_pid: Pid,
+        signal: u64,
+    ) -> Result<SignalDelivery, SignalTerminationError> {
+        if caller_pid == target_pid {
+            return Err(SignalTerminationError::SelfTarget);
+        }
+
+        let caller_credentials = self
+            .processes
+            .get(&caller_pid)
+            .map(|process| process.credentials)
+            .ok_or(SignalTerminationError::Missing)?;
+        let target = self
+            .processes
+            .get(&target_pid)
+            .ok_or(SignalTerminationError::Missing)?;
+        if target.kind != ProcessKind::UserProcess {
+            return Err(SignalTerminationError::KernelTask);
+        }
+        if matches!(
+            target.state,
+            ProcessState::Exited | ProcessState::Zombie | ProcessState::Reaped
+        ) {
+            return Err(SignalTerminationError::AlreadyExited);
+        }
+        if caller_credentials.uid != 0 && caller_credentials.uid != target.credentials.uid {
+            return Err(SignalTerminationError::PermissionDenied);
+        }
+
+        let signal_mask = signal_bit(signal).ok_or(SignalTerminationError::Missing)?;
+        if target.blocked_signals & signal_mask != 0 {
+            let target = self
+                .processes
+                .get_mut(&target_pid)
+                .expect("validated signal target must remain present");
+            target.pending_signals |= signal_mask;
+            return Ok(SignalDelivery::Pending {
+                pid: target.pid,
+                name: target.name,
+                signal,
+                pending_signals: target.pending_signals,
+            });
+        }
+
+        let disposition = target.sigterm_disposition;
+        if disposition == SIG_IGN {
+            return Ok(SignalDelivery::Ignored {
+                pid: target.pid,
+                name: target.name,
+                signal,
+            });
+        }
+        if disposition != SIG_DFL {
+            let pid = target.pid;
+            let name = target.name;
+            if self.activate_signal_handler(target_pid, signal, disposition) {
+                return Ok(SignalDelivery::Handled {
+                    pid,
+                    name,
+                    signal,
+                    handler: disposition,
+                });
+            }
+            let target = self
+                .processes
+                .get_mut(&target_pid)
+                .expect("validated signal target must remain present");
+            target.pending_signals |= signal_mask;
+            return Ok(SignalDelivery::Pending {
+                pid,
+                name,
+                signal,
+                pending_signals: target.pending_signals,
+            });
+        }
+
+        self.terminate_user_process(caller_pid, target_pid, 128 + signal)
+            .map(SignalDelivery::Terminated)
+    }
+
+    fn activate_signal_handler(&mut self, pid: Pid, signal: u64, handler: u64) -> bool {
+        let Some(process) = self.processes.get_mut(&pid) else {
+            return false;
+        };
+        let tid = process.main_tid();
+        let Some(thread) = process.threads.get_mut(tid) else {
+            return false;
+        };
+        if thread.signal_return_context.is_some() {
+            return false;
+        }
+        let Some(original) = thread.resume_context.take() else {
+            return false;
+        };
+        let mut handler_context = original;
+        handler_context.rip = handler;
+        handler_context.rdi = signal;
+        handler_context.rax = 0;
+        thread.signal_return_context = Some(original);
+        thread.resume_context = Some(handler_context);
+        thread.waiting_for = None;
+        thread.state = ThreadState::Ready;
+        process.waiting_for = None;
+        process.sleeping_until_tick = None;
+        process.refresh_state_from_threads();
+        self.enqueue_ready(tid);
+        true
+    }
+
+    pub fn signal_disposition(&self, pid: Pid, signal: u64) -> Option<u64> {
+        let process = self.processes.get(&pid)?;
+        (signal == SIGTERM).then_some(process.sigterm_disposition)
+    }
+
+    pub fn set_signal_disposition(
+        &mut self,
+        pid: Pid,
+        signal: u64,
+        disposition: u64,
+    ) -> Option<u64> {
+        if signal != SIGTERM {
+            return None;
+        }
+        let process = self.processes.get_mut(&pid)?;
+        let old = process.sigterm_disposition;
+        process.sigterm_disposition = disposition;
+        Some(old)
+    }
+
+    pub fn activate_running_signal_handler(
+        &mut self,
+        pid: Pid,
+        tid: Tid,
+        signal: u64,
+        handler: u64,
+        original: UserResumeContext,
+    ) -> bool {
+        let Some(process) = self.processes.get_mut(&pid) else {
+            return false;
+        };
+        let Some(thread) = process.threads.get_mut(tid) else {
+            return false;
+        };
+        if thread.state != ThreadState::Running || thread.signal_return_context.is_some() {
+            return false;
+        }
+        stop_thread_run(thread);
+        let mut handler_context = original;
+        handler_context.rip = handler;
+        handler_context.rdi = signal;
+        handler_context.rax = 0;
+        thread.signal_return_context = Some(original);
+        thread.resume_context = Some(handler_context);
+        thread.state = ThreadState::Ready;
+        process.refresh_state_from_threads();
+        self.enqueue_ready(tid);
+        true
+    }
+
+    pub fn restore_signal_context(&mut self, pid: Pid, tid: Tid) -> bool {
+        let Some(process) = self.processes.get_mut(&pid) else {
+            return false;
+        };
+        let Some(thread) = process.threads.get_mut(tid) else {
+            return false;
+        };
+        if thread.state != ThreadState::Running {
+            return false;
+        }
+        let Some(original) = thread.signal_return_context.take() else {
+            return false;
+        };
+        stop_thread_run(thread);
+        thread.resume_context = Some(original);
+        thread.state = ThreadState::Ready;
+        process.refresh_state_from_threads();
+        self.enqueue_ready(tid);
+        true
+    }
+
+    pub fn update_signal_mask(
+        &mut self,
+        pid: Pid,
+        how: SignalMaskHow,
+        mask: u64,
+    ) -> Option<SignalMaskUpdate> {
+        let process = self.processes.get_mut(&pid)?;
+        if process.kind != ProcessKind::UserProcess
+            || matches!(
+                process.state,
+                ProcessState::Exited | ProcessState::Zombie | ProcessState::Reaped
+            )
+        {
+            return None;
+        }
+
+        let old_mask = process.blocked_signals;
+        process.blocked_signals = match how {
+            SignalMaskHow::Block => old_mask | mask,
+            SignalMaskHow::Unblock => old_mask & !mask,
+            SignalMaskHow::SetMask => mask,
+        };
+        let deliverable = process.pending_signals & !process.blocked_signals;
+        let delivered_signal = lowest_signal(deliverable);
+        if let Some(signal) = delivered_signal {
+            process.pending_signals &= !signal_bit(signal).unwrap_or(0);
+        }
+
+        Some(SignalMaskUpdate {
+            old_mask,
+            new_mask: process.blocked_signals,
+            delivered_signal,
+        })
+    }
+
+    pub fn pending_signals(&self, pid: Pid) -> Option<u64> {
+        self.processes
+            .get(&pid)
+            .map(|process| process.pending_signals)
     }
 
     pub fn mark_reaped(&mut self, pid: Pid) -> bool {
@@ -1306,6 +2118,18 @@ impl ProcessTable {
     }
 }
 
+fn take_managed_stack_release(process: &mut Process, tid: Tid) -> Option<(u64, u64)> {
+    let p4_frame = process.address_space.p4_frame?;
+    let thread = process.threads.get_mut(tid)?;
+    if !thread.kernel_managed_stack {
+        return None;
+    }
+    let stack_top = thread.user_stack_top.take()?;
+    thread.user_stack_start = None;
+    thread.kernel_managed_stack = false;
+    Some((p4_frame, stack_top))
+}
+
 fn stop_process_run(process: &mut Process) {
     if CURRENT_USER_PID_ATOMIC.load(Ordering::Relaxed) == process.pid {
         CURRENT_USER_PID_ATOMIC.store(0, Ordering::Relaxed);
@@ -1376,6 +2200,22 @@ pub fn init_process_table() {
 
 pub fn stats() -> ProcessStats {
     PROCESS_TABLE.lock().stats()
+}
+
+pub fn create_kernel_thread() -> Option<Tid> {
+    PROCESS_TABLE.lock().create_kernel_thread()
+}
+
+pub fn set_kernel_thread_state(tid: Tid, state: ThreadState) -> bool {
+    PROCESS_TABLE.lock().set_kernel_thread_state(tid, state)
+}
+
+pub fn kernel_thread_state(tid: Tid) -> Option<ThreadState> {
+    PROCESS_TABLE.lock().kernel_thread_state(tid)
+}
+
+pub fn kernel_thread_runtime_ticks(tid: Tid) -> Option<u64> {
+    PROCESS_TABLE.lock().kernel_thread_runtime_ticks(tid)
 }
 
 pub fn userland_owns_keyboard() -> bool {
@@ -1477,6 +2317,13 @@ pub fn create_current_user_thread(
         .create_user_thread(pid, entry, stack_start, stack_top, initial_rsp, arg)
 }
 
+pub fn create_current_managed_user_thread(entry: u64, arg: u64) -> Option<Tid> {
+    let pid = current_user_pid()?;
+    PROCESS_TABLE
+        .lock()
+        .create_managed_user_thread(pid, entry, arg)
+}
+
 pub fn mark_current_thread_exited() -> Option<(Pid, Tid)> {
     let (pid, tid) = take_current_user()?;
     if PROCESS_TABLE.lock().mark_thread_exited(tid).is_none() {
@@ -1484,6 +2331,27 @@ pub fn mark_current_thread_exited() -> Option<(Pid, Tid)> {
         return None;
     }
     Some((pid, tid))
+}
+
+pub fn join_current_thread(target_tid: Tid, resume_context: UserResumeContext) -> ThreadJoinStatus {
+    let Some(caller_tid) = current_user_tid() else {
+        return ThreadJoinStatus::Missing;
+    };
+    PROCESS_TABLE
+        .lock()
+        .join_thread(caller_tid, target_tid, resume_context)
+}
+
+pub fn block_current_thread(resume_context: UserResumeContext) -> Option<Tid> {
+    let tid = current_user_tid()?;
+    PROCESS_TABLE
+        .lock()
+        .block_thread(tid, resume_context)
+        .then_some(tid)
+}
+
+pub fn wake_thread(tid: Tid, return_value: u64) -> bool {
+    PROCESS_TABLE.lock().wake_thread(tid, return_value)
 }
 
 pub fn reserve_pid() -> Pid {
@@ -1591,17 +2459,22 @@ pub fn mark_current_user_exited(status: u64) -> Option<Pid> {
 pub fn checkout_current_user_if_blocked() -> Option<BlockedUserReport> {
     let pid = *CURRENT_USER_PROCESS.lock();
     let pid = pid?;
+    let tid = *CURRENT_USER_THREAD.lock();
+    let tid = tid?;
     let table = PROCESS_TABLE.lock();
     let process = table.processes.get(&pid)?;
-    if process.state != ProcessState::Blocked {
+    let thread = process.threads.get(tid)?;
+    if thread.state != ThreadState::Blocked {
         return None;
     }
 
     let report = BlockedUserReport {
         pid,
+        tid,
         name: process.name,
         waiting_for: process.waiting_for,
-        resume_context: process.main_thread().resume_context,
+        waiting_for_thread: thread.waiting_for,
+        resume_context: thread.resume_context,
     };
     drop(table);
     set_current_user(None, None);
@@ -1669,6 +2542,91 @@ pub fn wait_target_status(parent_pid: Pid, child_pid: Pid) -> WaitTargetStatus {
 
 pub fn contains_pid(pid: Pid) -> bool {
     PROCESS_TABLE.lock().contains_pid(pid)
+}
+
+pub fn terminate_user_process(
+    caller_pid: Pid,
+    target_pid: Pid,
+    status: u64,
+) -> Result<SignalTerminationReport, SignalTerminationError> {
+    let report = PROCESS_TABLE
+        .lock()
+        .terminate_user_process(caller_pid, target_pid, status)?;
+    crate::user::syscall::close_process_files(target_pid);
+    if let Some(p4_frame) = report.p4_frame {
+        crate::user::address_space::release_prepared_p4_frame(p4_frame);
+    }
+    Ok(report)
+}
+
+pub fn send_signal(
+    caller_pid: Pid,
+    target_pid: Pid,
+    signal: u64,
+) -> Result<SignalDelivery, SignalTerminationError> {
+    let delivery = PROCESS_TABLE
+        .lock()
+        .send_signal(caller_pid, target_pid, signal)?;
+    if let SignalDelivery::Terminated(report) = delivery {
+        crate::user::syscall::close_process_files(target_pid);
+        if let Some(p4_frame) = report.p4_frame {
+            crate::user::address_space::release_prepared_p4_frame(p4_frame);
+        }
+    }
+    Ok(delivery)
+}
+
+pub fn update_current_signal_mask(how: SignalMaskHow, mask: u64) -> Option<SignalMaskUpdate> {
+    let pid = current_user_pid()?;
+    PROCESS_TABLE.lock().update_signal_mask(pid, how, mask)
+}
+
+pub fn current_pending_signals() -> Option<u64> {
+    let pid = current_user_pid()?;
+    PROCESS_TABLE.lock().pending_signals(pid)
+}
+
+pub fn current_signal_disposition(signal: u64) -> Option<u64> {
+    let pid = current_user_pid()?;
+    PROCESS_TABLE.lock().signal_disposition(pid, signal)
+}
+
+pub fn set_current_signal_disposition(signal: u64, disposition: u64) -> Option<u64> {
+    let pid = current_user_pid()?;
+    PROCESS_TABLE
+        .lock()
+        .set_signal_disposition(pid, signal, disposition)
+}
+
+pub fn checkout_current_user_for_signal_handler(
+    signal: u64,
+    handler: u64,
+    original: UserResumeContext,
+) -> Option<SignalHandlerReport> {
+    let pid = current_user_pid()?;
+    let tid = current_user_tid()?;
+    if !PROCESS_TABLE
+        .lock()
+        .activate_running_signal_handler(pid, tid, signal, handler, original)
+    {
+        return None;
+    }
+    take_current_user()?;
+    Some(SignalHandlerReport {
+        pid,
+        tid,
+        signal,
+        handler,
+    })
+}
+
+pub fn checkout_current_user_after_sigreturn() -> Option<(Pid, Tid)> {
+    let pid = current_user_pid()?;
+    let tid = current_user_tid()?;
+    if !PROCESS_TABLE.lock().restore_signal_context(pid, tid) {
+        return None;
+    }
+    take_current_user()
 }
 
 pub fn resume_waiting_parent(parent_pid: Pid, child_pid: Pid) -> Option<WaitResume> {
@@ -1790,6 +2748,83 @@ pub fn current_user_credentials() -> Option<ProcessCredentials> {
     PROCESS_TABLE.lock().credentials_for(pid)
 }
 
+pub fn current_process_group_id() -> Option<Pid> {
+    let pid = current_user_pid()?;
+    PROCESS_TABLE.lock().process_group_id(pid)
+}
+
+pub fn set_terminal_foreground_job(pid: Pid) {
+    TERMINAL_FOREGROUND_PID.store(pid, Ordering::Release);
+}
+
+pub fn clear_terminal_foreground_job(pid: Pid) {
+    let _ = TERMINAL_FOREGROUND_PID.compare_exchange(pid, 0, Ordering::AcqRel, Ordering::Acquire);
+}
+
+pub fn terminal_foreground_job() -> Option<Pid> {
+    let pid = TERMINAL_FOREGROUND_PID.load(Ordering::Acquire);
+    (pid != 0).then_some(pid)
+}
+
+pub fn deliver_terminal_signal(signal: u64) -> Option<TerminalSignalReport> {
+    let pid = terminal_foreground_job()?;
+    match signal {
+        SIGINT => {
+            let caller_pid = PROCESS_TABLE
+                .lock()
+                .processes
+                .get(&pid)
+                .and_then(|process| process.parent_pid)
+                .unwrap_or(1);
+            let report = terminate_user_process(caller_pid, pid, 128 + SIGINT).ok()?;
+            clear_terminal_foreground_job(pid);
+            crate::user::program::take_user_shell_wait_request_for_child(pid);
+            Some(TerminalSignalReport {
+                pid,
+                name: report.name,
+                signal,
+                status: 128 + signal,
+                stopped: false,
+                parent_woken: report.parent_woken,
+            })
+        }
+        SIGTSTP => {
+            let report = PROCESS_TABLE.lock().stop_user_process(pid, signal)?;
+            clear_terminal_foreground_job(pid);
+            crate::user::program::take_user_shell_wait_request_for_child(pid);
+            Some(report)
+        }
+        _ => None,
+    }
+}
+
+pub fn continue_process(caller_pid: Pid, pid: Pid) -> bool {
+    PROCESS_TABLE.lock().continue_user_process(caller_pid, pid)
+}
+
+pub fn process_group_id(pid: Pid) -> Option<Pid> {
+    PROCESS_TABLE.lock().process_group_id(pid)
+}
+
+pub fn session_id(pid: Pid) -> Option<Pid> {
+    PROCESS_TABLE.lock().session_id(pid)
+}
+
+pub fn set_process_group(
+    caller_pid: Pid,
+    target_pid: Pid,
+    process_group_id: Pid,
+) -> Result<Pid, ProcessGroupError> {
+    PROCESS_TABLE
+        .lock()
+        .set_process_group(caller_pid, target_pid, process_group_id)
+}
+
+pub fn create_current_session() -> Result<Pid, ProcessGroupError> {
+    let pid = current_user_pid().ok_or(ProcessGroupError::Missing)?;
+    PROCESS_TABLE.lock().create_session(pid)
+}
+
 pub fn set_current_user_credentials(username: &str) -> bool {
     let Some(pid) = current_user_pid() else {
         return false;
@@ -1829,6 +2864,25 @@ pub fn current_user_layout() -> Option<crate::user::ring3::UserMemoryLayout> {
         .processes
         .get(&pid)
         .map(|process| process.address_space.layout)
+}
+
+pub fn current_user_range_owned(ptr: u64, end: u64) -> bool {
+    let Some(pid) = current_user_pid() else {
+        return false;
+    };
+    let table = PROCESS_TABLE.lock();
+    let Some(process) = table.processes.get(&pid) else {
+        return false;
+    };
+    let layout = process.address_space.layout;
+    let in_program = ptr >= layout.program_start && end <= layout.program_end;
+    in_program
+        || process.threads.values().any(|thread| {
+            thread
+                .user_stack_start
+                .zip(thread.user_stack_top)
+                .is_some_and(|(start, top)| ptr >= start && end <= top)
+        })
 }
 
 pub fn current_user_address_space() -> Option<AddressSpace> {
@@ -1878,10 +2932,12 @@ pub fn print_processes() {
 
     for process in table.processes.values() {
         crate::println!(
-            "pid={} tid={} ppid={:?} kind={:?} mode={:?} name={} state={:?} tstate={:?} status={:?} wait={:?} ctx={} ticks={} resume={:?} as={:?} p4={:?} p4ok={} entry={:#x} mem={:#x}-{:#x} stack={:#x}-{:#x} arg={}",
+            "pid={} tid={} ppid={:?} pgid={} sid={} kind={:?} mode={:?} name={} state={:?} tstate={:?} status={:?} wait={:?} ctx={} ticks={} resume={:?} as={:?} p4={:?} p4ok={} entry={:#x} mem={:#x}-{:#x} stack={:#x}-{:#x} arg={}",
             process.pid,
             process.main_tid(),
             process.parent_pid,
+            process.process_group_id,
+            process.session_id,
             process.kind,
             process.job_mode,
             process.name,
@@ -1965,7 +3021,7 @@ pub fn write_processes_to_buffer(
     writer.write_u64(USER_PREEMPT_QUANTUM_TICKS);
     writer.write_byte(b'\n');
     writer.write_str(
-        "PID  TID  THR PPID KIND MODE STATE   EXIT WAIT RQ  CTX   TICKS NAME       ARG\n",
+        "PID  TID  THR PPID PGID SID  KIND MODE STATE   EXIT WAIT RQ  CTX   TICKS NAME       ARG\n",
     );
     let now = crate::timer::ticks();
 
@@ -1977,6 +3033,10 @@ pub fn write_processes_to_buffer(
         writer.write_usize_padded(process.threads.len(), 3);
         writer.write_byte(b' ');
         writer.write_opt_u32_padded(process.parent_pid, 4);
+        writer.write_byte(b' ');
+        writer.write_u32_padded(process.process_group_id, 4);
+        writer.write_byte(b' ');
+        writer.write_u32_padded(process.session_id, 4);
         writer.write_byte(b' ');
         writer.write_str(process_kind_name(process.kind));
         writer.write_byte(b' ');
@@ -2009,6 +3069,7 @@ fn process_state_name(state: ProcessState) -> &'static str {
         ProcessState::Ready => "Ready",
         ProcessState::Running => "Running",
         ProcessState::Blocked => "Blocked",
+        ProcessState::Stopped => "Stopped",
         ProcessState::Exited => "Exited",
         ProcessState::Zombie => "Zombie",
         ProcessState::Reaped => "Reaped",
@@ -2164,7 +3225,9 @@ fn decimal_len(mut value: u64) -> usize {
 #[cfg(test)]
 mod tests {
     use super::{
-        ProcessKind, ProcessState, ProcessTable, UserFaultKind, UserResumeContext,
+        ProcessCredentials, ProcessGroupError, ProcessKind, ProcessState, ProcessTable, SIG_DFL,
+        SIG_IGN, SIGTERM, SIGTERM_MASK, SIGTSTP, SignalDelivery, SignalMaskHow,
+        SignalTerminationError, ThreadJoinStatus, ThreadState, UserFaultKind, UserResumeContext,
         WaitTargetStatus, classify_user_fault,
     };
     use crate::user::address_space::AddressSpace;
@@ -2312,6 +3375,86 @@ mod tests {
     }
 
     #[test_case]
+    fn thread_join_blocks_caller_and_wakes_it_when_target_exits() {
+        let mut table = ProcessTable::new();
+        let pid = table.create_process(
+            Some(1),
+            "thread-join",
+            "/bin/thread-join",
+            crate::user::program::UserProgramArg::empty(),
+            AddressSpace::kernel_shared_user(
+                0x400000,
+                crate::user::ring3::memory_layout_for_pid(2),
+            ),
+        );
+        table.mark_running(pid);
+        let main_tid = table.processes.get(&pid).unwrap().main_tid();
+        let worker_tid = table
+            .create_user_thread(pid, 0x401000, 0x1020000, 0x1021000, 0x1020ff8, 42)
+            .unwrap();
+        let join_context = resume_context(0x400123, 0x13f0f00);
+
+        assert_eq!(
+            table.join_thread(main_tid, worker_tid, join_context),
+            ThreadJoinStatus::Blocked
+        );
+        assert_eq!(
+            table.thread(main_tid).unwrap().state,
+            crate::user::thread::ThreadState::Blocked
+        );
+        assert_eq!(
+            table.thread(main_tid).unwrap().waiting_for,
+            Some(worker_tid)
+        );
+
+        let worker = table.schedule_next_ready_user().unwrap();
+        assert_eq!(worker.tid, worker_tid);
+        assert_eq!(table.mark_thread_exited(worker_tid), Some(pid));
+        assert_eq!(
+            table.thread(worker_tid).unwrap().state,
+            crate::user::thread::ThreadState::Reaped
+        );
+        assert_eq!(
+            table.thread(main_tid).unwrap().state,
+            crate::user::thread::ThreadState::Ready
+        );
+
+        let resumed = table.schedule_next_ready_user().unwrap();
+        assert_eq!(resumed.tid, main_tid);
+        assert_eq!(resumed.resume_context, join_context);
+    }
+
+    #[test_case]
+    fn generic_wait_queue_block_and_wake_preserve_syscall_context() {
+        let mut table = ProcessTable::new();
+        let pid = table.create_process(
+            Some(1),
+            "event-wait",
+            "/bin/eventdemo",
+            crate::user::program::UserProgramArg::empty(),
+            AddressSpace::kernel_shared_user(
+                0x400000,
+                crate::user::ring3::memory_layout_for_pid(2),
+            ),
+        );
+        table.mark_running(pid);
+        let tid = table.processes.get(&pid).unwrap().main_tid();
+        let context = resume_context(0x401234, 0x13f0f00);
+
+        assert!(table.block_thread(tid, context));
+        assert_eq!(
+            table.thread(tid).unwrap().state,
+            crate::user::thread::ThreadState::Blocked
+        );
+        assert!(table.wake_thread(tid, 77));
+
+        let resumed = table.schedule_next_ready_user().unwrap();
+        assert_eq!(resumed.tid, tid);
+        assert_eq!(resumed.resume_context.rax, 77);
+        assert_eq!(resumed.resume_context.rip, context.rip);
+    }
+
+    #[test_case]
     fn kernel_placeholder_is_tracked_separately_from_user_processes() {
         let mut table = ProcessTable::new();
         let kernel = table.create_process(
@@ -2342,6 +3485,31 @@ mod tests {
         );
         assert_eq!(table.stats().kernel_task_count, 1);
         assert_eq!(table.stats().user_process_count, 1);
+    }
+
+    #[test_case]
+    fn kernel_scheduler_threads_share_kernel_process_and_global_tid_namespace() {
+        let mut table = ProcessTable::new();
+        let kernel = table.create_process(
+            None,
+            "kernel",
+            "kernel",
+            crate::user::program::UserProgramArg::empty(),
+            AddressSpace::kernel_placeholder(0),
+        );
+        let idle_tid = table.create_kernel_thread().unwrap();
+        let worker_tid = table.create_kernel_thread().unwrap();
+
+        assert_eq!(kernel, 1);
+        assert_eq!(idle_tid, 2);
+        assert_eq!(worker_tid, 3);
+        assert_eq!(table.thread(idle_tid).unwrap().process_id, kernel);
+        assert_eq!(
+            table.thread(worker_tid).unwrap().kind,
+            crate::user::thread::ThreadKind::Kernel
+        );
+        assert_eq!(table.stats().process_count, 1);
+        assert_eq!(table.stats().thread_count, 3);
     }
 
     #[test_case]
@@ -2850,6 +4018,492 @@ mod tests {
         assert_eq!(
             table.processes.get(&child).unwrap().state,
             ProcessState::Reaped
+        );
+    }
+
+    #[test_case]
+    fn sigterm_terminates_ready_user_process_with_signal_status() {
+        let mut table = ProcessTable::new();
+        let caller = table.create_process(
+            None,
+            "sh",
+            "/bin/sh",
+            crate::user::program::UserProgramArg::empty(),
+            AddressSpace::kernel_shared_user(
+                0x400000,
+                crate::user::ring3::memory_layout_for_pid(1),
+            ),
+        );
+        let target = table.create_process_with_job_mode(
+            Some(caller),
+            "sleep",
+            "/bin/sleep",
+            crate::user::program::UserProgramArg::empty(),
+            crate::user::program::JobMode::Background,
+            AddressSpace::kernel_shared_user(
+                0x401000,
+                crate::user::ring3::memory_layout_for_pid(2),
+            ),
+        );
+        table.mark_ready(target);
+
+        let report = table
+            .terminate_user_process(caller, target, 143)
+            .expect("root caller should terminate background child");
+
+        assert_eq!(report.pid, target);
+        assert_eq!(report.status, 143);
+        assert_eq!(report.job_mode, crate::user::program::JobMode::Background);
+        assert!(!report.parent_woken);
+        assert_eq!(
+            table.processes.get(&target).unwrap().state,
+            ProcessState::Zombie
+        );
+        assert_eq!(table.processes.get(&target).unwrap().exit_status, Some(143));
+        assert_eq!(table.ready_queue_position(target), None);
+    }
+
+    #[test_case]
+    fn sigterm_wakes_parent_blocked_in_waitpid() {
+        let mut table = ProcessTable::new();
+        let parent = table.create_process(
+            None,
+            "sh",
+            "/bin/sh",
+            crate::user::program::UserProgramArg::empty(),
+            AddressSpace::kernel_shared_user(
+                0x400000,
+                crate::user::ring3::memory_layout_for_pid(1),
+            ),
+        );
+        let child = table.create_process(
+            Some(parent),
+            "sleep",
+            "/bin/sleep",
+            crate::user::program::UserProgramArg::empty(),
+            AddressSpace::kernel_shared_user(
+                0x401000,
+                crate::user::ring3::memory_layout_for_pid(2),
+            ),
+        );
+        let killer = table.create_process(
+            None,
+            "killer",
+            "/bin/kill",
+            crate::user::program::UserProgramArg::empty(),
+            AddressSpace::kernel_shared_user(
+                0x402000,
+                crate::user::ring3::memory_layout_for_pid(3),
+            ),
+        );
+        let waiting_context = resume_context(0x400123, 0x7ff000);
+        table.mark_running(parent);
+        assert!(table.mark_waiting(parent, child, waiting_context));
+
+        let report = table
+            .terminate_user_process(killer, child, 143)
+            .expect("root caller should terminate waited child");
+
+        assert!(report.parent_woken);
+        assert_eq!(
+            table.processes.get(&child).unwrap().state,
+            ProcessState::Reaped
+        );
+        let parent = table.processes.get(&parent).unwrap();
+        assert_eq!(parent.state, ProcessState::Ready);
+        assert_eq!(parent.waiting_for, None);
+        assert_eq!(parent.main_thread().resume_context.unwrap().rax, 143);
+    }
+
+    #[test_case]
+    fn sigterm_enforces_process_kind_and_uid_permissions() {
+        let mut table = ProcessTable::new();
+        let kernel = table.create_process(
+            None,
+            "kernel",
+            "kernel",
+            crate::user::program::UserProgramArg::empty(),
+            AddressSpace::kernel_placeholder(0),
+        );
+        let root_target = table.create_process(
+            None,
+            "root-task",
+            "/bin/root-task",
+            crate::user::program::UserProgramArg::empty(),
+            AddressSpace::kernel_shared_user(
+                0x400000,
+                crate::user::ring3::memory_layout_for_pid(2),
+            ),
+        );
+        let user = table.create_process(
+            None,
+            "user-task",
+            "/bin/user-task",
+            crate::user::program::UserProgramArg::empty(),
+            AddressSpace::kernel_shared_user(
+                0x401000,
+                crate::user::ring3::memory_layout_for_pid(3),
+            ),
+        );
+        assert!(table.set_credentials(user, ProcessCredentials::from_username("hafifi")));
+
+        assert_eq!(
+            table.terminate_user_process(user, kernel, 143),
+            Err(SignalTerminationError::KernelTask)
+        );
+        assert_eq!(
+            table.terminate_user_process(user, root_target, 143),
+            Err(SignalTerminationError::PermissionDenied)
+        );
+    }
+
+    #[test_case]
+    fn blocked_sigterm_becomes_pending_until_unblocked() {
+        let mut table = ProcessTable::new();
+        let caller = table.create_process(
+            None,
+            "sh",
+            "/bin/sh",
+            crate::user::program::UserProgramArg::empty(),
+            AddressSpace::kernel_shared_user(
+                0x400000,
+                crate::user::ring3::memory_layout_for_pid(1),
+            ),
+        );
+        let target = table.create_process(
+            Some(caller),
+            "signaldemo",
+            "/bin/signaldemo",
+            crate::user::program::UserProgramArg::empty(),
+            AddressSpace::kernel_shared_user(
+                0x401000,
+                crate::user::ring3::memory_layout_for_pid(2),
+            ),
+        );
+        let blocked = table
+            .update_signal_mask(target, SignalMaskHow::Block, SIGTERM_MASK)
+            .expect("target signal mask should update");
+        assert_eq!(blocked.old_mask, 0);
+        assert_eq!(blocked.new_mask, SIGTERM_MASK);
+
+        assert_eq!(
+            table.send_signal(caller, target, SIGTERM),
+            Ok(SignalDelivery::Pending {
+                pid: target,
+                name: "signaldemo",
+                signal: SIGTERM,
+                pending_signals: SIGTERM_MASK,
+            })
+        );
+        assert_eq!(table.pending_signals(target), Some(SIGTERM_MASK));
+        assert_ne!(
+            table.processes.get(&target).unwrap().state,
+            ProcessState::Zombie
+        );
+
+        let unblocked = table
+            .update_signal_mask(target, SignalMaskHow::Unblock, SIGTERM_MASK)
+            .expect("target signal mask should update");
+        assert_eq!(unblocked.old_mask, SIGTERM_MASK);
+        assert_eq!(unblocked.new_mask, 0);
+        assert_eq!(unblocked.delivered_signal, Some(SIGTERM));
+        assert_eq!(table.pending_signals(target), Some(0));
+    }
+
+    #[test_case]
+    fn signal_setmask_reports_previous_mask() {
+        let mut table = ProcessTable::new();
+        let target = table.create_process(
+            None,
+            "signaldemo",
+            "/bin/signaldemo",
+            crate::user::program::UserProgramArg::empty(),
+            AddressSpace::kernel_shared_user(
+                0x400000,
+                crate::user::ring3::memory_layout_for_pid(1),
+            ),
+        );
+
+        let first = table
+            .update_signal_mask(target, SignalMaskHow::SetMask, SIGTERM_MASK)
+            .unwrap();
+        let second = table
+            .update_signal_mask(target, SignalMaskHow::SetMask, 0)
+            .unwrap();
+
+        assert_eq!(first.old_mask, 0);
+        assert_eq!(first.new_mask, SIGTERM_MASK);
+        assert_eq!(second.old_mask, SIGTERM_MASK);
+        assert_eq!(second.new_mask, 0);
+    }
+
+    #[test_case]
+    fn sigterm_handler_replaces_and_restores_saved_context() {
+        let mut table = ProcessTable::new();
+        let caller = table.create_process(
+            None,
+            "sh",
+            "/bin/sh",
+            crate::user::program::UserProgramArg::empty(),
+            AddressSpace::kernel_shared_user(
+                0x400000,
+                crate::user::ring3::memory_layout_for_pid(1),
+            ),
+        );
+        let target = table.create_process(
+            Some(caller),
+            "handlerdemo",
+            "/bin/handlerdemo",
+            crate::user::program::UserProgramArg::empty(),
+            AddressSpace::kernel_shared_user(
+                0x401000,
+                crate::user::ring3::memory_layout_for_pid(2),
+            ),
+        );
+        let original = resume_context(0x401234, 0x13f0f00);
+        let handler = 0x402000;
+        assert_eq!(
+            table.set_signal_disposition(target, SIGTERM, handler),
+            Some(SIG_DFL)
+        );
+        table.mark_running(target);
+        assert!(table.mark_sleeping(target, 999, original));
+
+        assert_eq!(
+            table.send_signal(caller, target, SIGTERM),
+            Ok(SignalDelivery::Handled {
+                pid: target,
+                name: "handlerdemo",
+                signal: SIGTERM,
+                handler,
+            })
+        );
+
+        let thread = table.processes.get(&target).unwrap().main_thread();
+        assert_eq!(thread.state, ThreadState::Ready);
+        assert_eq!(thread.signal_return_context, Some(original));
+        assert_eq!(thread.resume_context.unwrap().rip, handler);
+        assert_eq!(thread.resume_context.unwrap().rdi, SIGTERM);
+
+        let scheduled = table.schedule_next_ready_user().unwrap();
+        assert_eq!(scheduled.pid, target);
+        assert_eq!(scheduled.resume_context.rip, handler);
+        assert!(table.restore_signal_context(target, scheduled.tid));
+        let restored = table.schedule_next_ready_user().unwrap();
+        assert_eq!(restored.resume_context, original);
+    }
+
+    #[test_case]
+    fn ignored_sigterm_does_not_terminate_target() {
+        let mut table = ProcessTable::new();
+        let caller = table.create_process(
+            None,
+            "sh",
+            "/bin/sh",
+            crate::user::program::UserProgramArg::empty(),
+            AddressSpace::kernel_shared_user(
+                0x400000,
+                crate::user::ring3::memory_layout_for_pid(1),
+            ),
+        );
+        let target = table.create_process(
+            Some(caller),
+            "worker",
+            "/bin/worker",
+            crate::user::program::UserProgramArg::empty(),
+            AddressSpace::kernel_shared_user(
+                0x401000,
+                crate::user::ring3::memory_layout_for_pid(2),
+            ),
+        );
+        assert_eq!(
+            table.set_signal_disposition(target, SIGTERM, SIG_IGN),
+            Some(SIG_DFL)
+        );
+        assert_eq!(
+            table.send_signal(caller, target, SIGTERM),
+            Ok(SignalDelivery::Ignored {
+                pid: target,
+                name: "worker",
+                signal: SIGTERM,
+            })
+        );
+        assert_eq!(table.processes.get(&target).unwrap().exit_status, None);
+    }
+
+    #[test_case]
+    fn child_inherits_parent_process_group_and_session() {
+        let mut table = ProcessTable::new();
+        let kernel = table.create_process(
+            None,
+            "kernel",
+            "kernel",
+            crate::user::program::UserProgramArg::empty(),
+            AddressSpace::kernel_placeholder(0),
+        );
+        let init = table.create_process(
+            Some(kernel),
+            "init",
+            "/bin/init",
+            crate::user::program::UserProgramArg::empty(),
+            AddressSpace::kernel_shared_user(
+                0x400000,
+                crate::user::ring3::memory_layout_for_pid(2),
+            ),
+        );
+        let shell = table.create_process(
+            Some(init),
+            "sh",
+            "/bin/sh",
+            crate::user::program::UserProgramArg::empty(),
+            AddressSpace::kernel_shared_user(
+                0x401000,
+                crate::user::ring3::memory_layout_for_pid(3),
+            ),
+        );
+
+        assert_eq!(table.process_group_id(init), Some(init));
+        assert_eq!(table.session_id(init), Some(init));
+        assert_eq!(table.process_group_id(shell), Some(init));
+        assert_eq!(table.session_id(shell), Some(init));
+    }
+
+    #[test_case]
+    fn process_can_create_group_then_child_can_join_it() {
+        let mut table = ProcessTable::new();
+        let parent = table.create_process(
+            None,
+            "parent",
+            "/bin/parent",
+            crate::user::program::UserProgramArg::empty(),
+            AddressSpace::kernel_shared_user(
+                0x400000,
+                crate::user::ring3::memory_layout_for_pid(1),
+            ),
+        );
+        let first = table.create_process(
+            Some(parent),
+            "first",
+            "/bin/first",
+            crate::user::program::UserProgramArg::empty(),
+            AddressSpace::kernel_shared_user(
+                0x401000,
+                crate::user::ring3::memory_layout_for_pid(2),
+            ),
+        );
+        let second = table.create_process(
+            Some(parent),
+            "second",
+            "/bin/second",
+            crate::user::program::UserProgramArg::empty(),
+            AddressSpace::kernel_shared_user(
+                0x402000,
+                crate::user::ring3::memory_layout_for_pid(3),
+            ),
+        );
+
+        assert_eq!(table.set_process_group(parent, first, 0), Ok(first));
+        assert_eq!(table.set_process_group(parent, second, first), Ok(first));
+        assert_eq!(table.process_group_id(first), Some(first));
+        assert_eq!(table.process_group_id(second), Some(first));
+        assert_eq!(table.session_id(first), table.session_id(parent));
+    }
+
+    #[test_case]
+    fn setsid_creates_new_session_and_rejects_group_leader() {
+        let mut table = ProcessTable::new();
+        let parent = table.create_process(
+            None,
+            "parent",
+            "/bin/parent",
+            crate::user::program::UserProgramArg::empty(),
+            AddressSpace::kernel_shared_user(
+                0x400000,
+                crate::user::ring3::memory_layout_for_pid(1),
+            ),
+        );
+        let child = table.create_process(
+            Some(parent),
+            "child",
+            "/bin/child",
+            crate::user::program::UserProgramArg::empty(),
+            AddressSpace::kernel_shared_user(
+                0x401000,
+                crate::user::ring3::memory_layout_for_pid(2),
+            ),
+        );
+
+        assert_eq!(table.create_session(child), Ok(child));
+        assert_eq!(table.session_id(child), Some(child));
+        assert_eq!(table.process_group_id(child), Some(child));
+        assert_eq!(
+            table.create_session(child),
+            Err(ProcessGroupError::GroupLeader)
+        );
+        assert_eq!(
+            table.set_process_group(child, child, 0),
+            Err(ProcessGroupError::SessionLeader)
+        );
+    }
+
+    #[test_case]
+    fn sigtstp_stops_child_wakes_parent_and_sigcont_resumes() {
+        let mut table = ProcessTable::new();
+        let parent = table.create_process(
+            None,
+            "sh",
+            "/bin/sh",
+            crate::user::program::UserProgramArg::empty(),
+            AddressSpace::kernel_shared_user(
+                0x400000,
+                crate::user::ring3::memory_layout_for_pid(1),
+            ),
+        );
+        let child = table.create_process(
+            Some(parent),
+            "sleep",
+            "/bin/sleep",
+            crate::user::program::UserProgramArg::empty(),
+            AddressSpace::kernel_shared_user(
+                0x401000,
+                crate::user::ring3::memory_layout_for_pid(2),
+            ),
+        );
+        table.mark_running(child);
+        assert!(table.mark_sleeping(child, 500, resume_context(0x401234, 0x13f0f00)));
+        table.mark_running(parent);
+        assert!(table.mark_waiting(parent, child, resume_context(0x400456, 0x13f2f00)));
+
+        let report = table
+            .stop_user_process(child, SIGTSTP)
+            .expect("foreground child should stop");
+        assert!(report.stopped);
+        assert!(report.parent_woken);
+        assert_eq!(report.status, 148);
+        assert_eq!(
+            table.processes.get(&child).unwrap().state,
+            ProcessState::Stopped
+        );
+        assert_eq!(
+            table.processes.get(&parent).unwrap().state,
+            ProcessState::Ready
+        );
+        assert_eq!(
+            table
+                .processes
+                .get(&parent)
+                .unwrap()
+                .main_thread()
+                .resume_context
+                .unwrap()
+                .rax,
+            148
+        );
+
+        assert!(table.continue_user_process(parent, child));
+        assert_eq!(
+            table.processes.get(&child).unwrap().state,
+            ProcessState::Ready
         );
     }
 

@@ -3,6 +3,11 @@ use crate::serial_println;
 const DEBUG_INPUT_EVENTS: bool = false;
 const DEBUG_INPUT_OVERLAY: bool = false;
 
+pub extern "C" fn kernel_event_thread() -> ! {
+    serial_println!("[KTHREAD] runtime event loop started");
+    run_event_loop();
+}
+
 pub fn run_event_loop() -> ! {
     loop {
         if let Some(event) = crate::input::dequeue_event() {
@@ -164,6 +169,24 @@ fn run_pending_user_program() {
 }
 
 fn run_ready_user_process() {
+    if let Some(signal) = crate::input::take_terminal_signal() {
+        if let Some(report) = crate::user::process::deliver_terminal_signal(signal) {
+            crate::serial_println!(
+                "[TTY] signal={} pid={} name={} status={} stopped={} parent_woken={}",
+                report.signal,
+                report.pid,
+                report.name,
+                report.status,
+                report.stopped,
+                report.parent_woken
+            );
+        } else if crate::user::process::terminal_foreground_job().is_some() {
+            crate::input::requeue_terminal_signal(signal);
+        } else {
+            crate::serial_println!("[TTY] ignored signal={} without foreground job", signal);
+        }
+    }
+
     let woken = crate::user::process::wake_sleeping_processes(crate::timer::ticks());
     if woken > 0 {
         crate::serial_println!("[USER] woke {} sleeping user process(es)", woken);

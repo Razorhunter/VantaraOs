@@ -1,5 +1,5 @@
+use crate::sync::PreemptMutex as Mutex;
 use alloc::collections::VecDeque;
-use spin::Mutex;
 
 pub struct ReadyQueue {
     queue: Mutex<VecDeque<u32>>,

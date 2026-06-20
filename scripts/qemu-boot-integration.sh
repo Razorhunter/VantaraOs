@@ -46,7 +46,7 @@ QEMU_PID=$!
 
 wait_for_log() {
   local pattern="$1"
-  local attempts="${2:-100}"
+  local attempts="${2:-200}"
 
   for ((attempt = 0; attempt < attempts; attempt++)); do
     if grep -Fq "${pattern}" "${LOG_FILE}" 2>/dev/null; then

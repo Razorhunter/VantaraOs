@@ -1,0 +1,6 @@
+eventdemo: created
+eventdemo: waiting
+eventdemo: worker signaling
+eventdemo: woke
+eventdemo: latched signal ok
+eventdemo: done

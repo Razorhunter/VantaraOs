@@ -1,8 +1,8 @@
 use alloc::collections::VecDeque;
 use core::sync::atomic::{AtomicU64, Ordering};
 
+use crate::sync::PreemptMutex as Mutex;
 use lazy_static::lazy_static;
-use spin::Mutex;
 
 use pc_keyboard::KeyCode;
 
@@ -69,6 +69,7 @@ static TYPED_CHAR_EVENTS: AtomicU64 = AtomicU64::new(0);
 static MOUSE_MOVE_EVENTS: AtomicU64 = AtomicU64::new(0);
 static MOUSE_BUTTON_EVENTS: AtomicU64 = AtomicU64::new(0);
 static DROPPED_EVENTS: AtomicU64 = AtomicU64::new(0);
+static TERMINAL_SIGNAL: AtomicU64 = AtomicU64::new(0);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct InputStats {
@@ -146,13 +147,26 @@ impl InputQueue {
         self.enqueue(InputEvent::MouseButton { button, pressed });
     }
 
-    pub fn handle_keyboard_key(&mut self, key: KeyCode, pressed: bool) {
+    pub fn handle_keyboard_key(&mut self, key: KeyCode, pressed: bool) -> bool {
         self.update_modifier_state(key, pressed);
         KEYBOARD_EVENTS.fetch_add(1, Ordering::Relaxed);
+        let terminal_control =
+            pressed && self.modifiers.ctrl && matches!(key, KeyCode::C | KeyCode::Z);
+        if terminal_control {
+            let signal = match key {
+                KeyCode::C => crate::user::process::SIGINT,
+                KeyCode::Z => crate::user::process::SIGTSTP,
+                _ => unreachable!(),
+            };
+            TERMINAL_SIGNAL.store(signal, Ordering::Release);
+        }
         if pressed {
-            self.enqueue_terminal_sequence(key);
+            if !terminal_control {
+                self.enqueue_terminal_sequence(key);
+            }
         }
         self.enqueue(InputEvent::KeyboardKey { key, pressed });
+        terminal_control
     }
 
     pub fn handle_keyboard_char(&mut self, ch: char) {
@@ -239,6 +253,15 @@ pub fn dequeue_keyboard_byte() -> Option<u8> {
     INPUT_QUEUE.lock().dequeue_keyboard_byte()
 }
 
+pub fn take_terminal_signal() -> Option<u64> {
+    let signal = TERMINAL_SIGNAL.swap(0, Ordering::AcqRel);
+    (signal != 0).then_some(signal)
+}
+
+pub fn requeue_terminal_signal(signal: u64) {
+    TERMINAL_SIGNAL.store(signal, Ordering::Release);
+}
+
 pub fn key_emits_terminal_sequence(key: KeyCode) -> bool {
     terminal_sequence_for_key(key).is_some()
 }
@@ -298,7 +321,7 @@ pub fn draw_debug_overlay() {
 
 #[cfg(test)]
 mod tests {
-    use super::{InputEvent, InputQueue, MouseButton};
+    use super::{InputEvent, InputQueue, MouseButton, take_terminal_signal};
     use pc_keyboard::KeyCode;
 
     #[test_case]
@@ -353,5 +376,18 @@ mod tests {
         assert_eq!(queue.dequeue_keyboard_byte(), Some(b'['));
         assert_eq!(queue.dequeue_keyboard_byte(), Some(b'3'));
         assert_eq!(queue.dequeue_keyboard_byte(), Some(b'~'));
+    }
+
+    #[test_case]
+    fn ctrl_c_and_ctrl_z_queue_terminal_signals_without_stdin_bytes() {
+        let mut queue = InputQueue::new();
+        queue.handle_keyboard_key(KeyCode::LControl, true);
+        assert!(queue.handle_keyboard_key(KeyCode::C, true));
+        assert_eq!(take_terminal_signal(), Some(crate::user::process::SIGINT));
+        assert_eq!(queue.dequeue_keyboard_byte(), None);
+
+        assert!(queue.handle_keyboard_key(KeyCode::Z, true));
+        assert_eq!(take_terminal_signal(), Some(crate::user::process::SIGTSTP));
+        assert_eq!(queue.dequeue_keyboard_byte(), None);
     }
 }

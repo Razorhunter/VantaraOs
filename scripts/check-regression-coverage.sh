@@ -35,6 +35,8 @@ require_file "scripts/qemu-smoke.sh"
 require_file "scripts/qemu-boot-integration.sh"
 require_file "scripts/qemu-command-smoke.sh"
 require_file "scripts/qemu-preemption.sh"
+require_file "scripts/qemu-signal-job-control.sh"
+require_file "scripts/qemu-terminal-signals.sh"
 require_file "scripts/qemu-fault-isolation.sh"
 
 echo "regression coverage contract passed"

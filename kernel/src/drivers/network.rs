@@ -1,6 +1,6 @@
+use crate::sync::PreemptMutex as Mutex;
 use alloc::vec::Vec;
 use lazy_static::lazy_static;
-use spin::Mutex;
 
 use crate::drivers::pci::{self, PciDevice};
 

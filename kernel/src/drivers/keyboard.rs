@@ -1,6 +1,6 @@
+use crate::sync::PreemptMutex as Mutex;
 use lazy_static::lazy_static;
 use pc_keyboard::{DecodedKey, HandleControl, KeyEvent, KeyState, Keyboard, ScancodeSet1, layouts};
-use spin::Mutex;
 use x86_64::instructions::port::Port;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -51,13 +51,13 @@ impl KeyboardDriver for Ps2Keyboard {
         if let Ok(Some(key_event)) = keyboard.add_byte(scancode) {
             let key_code = key_event.code;
             let pressed = matches!(key_event.state, KeyState::Down | KeyState::SingleShot);
-            crate::input::INPUT_QUEUE
+            let terminal_control = crate::input::INPUT_QUEUE
                 .lock()
                 .handle_keyboard_key(key_code, pressed);
 
             if let Some(key) = keyboard.process_keyevent(key_event) {
                 if let DecodedKey::Unicode(ch) = key {
-                    if !crate::input::key_emits_terminal_sequence(key_code) {
+                    if !terminal_control && !crate::input::key_emits_terminal_sequence(key_code) {
                         crate::input::INPUT_QUEUE.lock().handle_keyboard_char(ch);
                     }
                 }

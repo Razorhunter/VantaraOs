@@ -18,6 +18,7 @@ if [[ ! -f "${BOOTIMAGE}" ]]; then
   make -C "${ROOT_DIR}" kernel-build
 fi
 
+rm -f "${LOG_FILE}"
 timeout 20s "${QEMU_BIN}" \
   -drive "format=raw,file=${BOOTIMAGE}" \
   -display none \
@@ -26,12 +27,27 @@ timeout 20s "${QEMU_BIN}" \
   -no-shutdown &
 
 QEMU_PID=$!
-sleep 5
+for _ in $(seq 1 150); do
+  if grep -Fq "[KTHREAD] runtime event loop started" "${LOG_FILE}" 2>/dev/null; then
+    break
+  fi
+  if grep -Eiq "kernel panic|EXCEPTION:" "${LOG_FILE}" 2>/dev/null; then
+    break
+  fi
+  sleep 0.1
+done
 kill "${QEMU_PID}" >/dev/null 2>&1 || true
 wait "${QEMU_PID}" >/dev/null 2>&1 || true
 
 grep -q "Vantara OS Kernel" "${LOG_FILE}"
 grep -q "boot check ok: heap" "${LOG_FILE}"
 grep -q "Vantara Kernel is running" "${LOG_FILE}"
+grep -Fq "[KTHREAD] normal scheduler starting runtime tid=" "${LOG_FILE}"
+grep -Fq "[KTHREAD] runtime event loop started" "${LOG_FILE}"
+
+if grep -Eiq "kernel panic|EXCEPTION:" "${LOG_FILE}"; then
+  echo "qemu smoke test failed: kernel panic detected" >&2
+  exit 1
+fi
 
 echo "qemu smoke test passed: ${LOG_FILE}"

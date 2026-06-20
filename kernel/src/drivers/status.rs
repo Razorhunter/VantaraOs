@@ -1,5 +1,5 @@
+use crate::sync::PreemptMutex as Mutex;
 use lazy_static::lazy_static;
-use spin::Mutex;
 
 const MAX_DRIVER_STATUSES: usize = 16;
 

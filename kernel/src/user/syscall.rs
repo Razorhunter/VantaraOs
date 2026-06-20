@@ -3,7 +3,7 @@ use core::slice;
 use core::str;
 use core::sync::atomic::{AtomicU64, Ordering};
 
-use spin::Mutex;
+use crate::sync::PreemptMutex as Mutex;
 
 pub const SYSCALL_INTERRUPT: u8 = 0x80;
 
@@ -38,9 +38,28 @@ pub const SYS_DRIVER_STATUS: u64 = 27;
 pub const SYS_ABI_INFO: u64 = 28;
 pub const SYS_THREAD_CREATE: u64 = 29;
 pub const SYS_THREAD_EXIT: u64 = 30;
+pub const SYS_THREAD_JOIN: u64 = 31;
+pub const SYS_THREAD_SPAWN: u64 = 32;
+pub const SYS_PIPE: u64 = 33;
+pub const SYS_EVENT_CREATE: u64 = 34;
+pub const SYS_EVENT_WAIT: u64 = 35;
+pub const SYS_EVENT_SIGNAL: u64 = 36;
+pub const SYS_EVENT_CLOSE: u64 = 37;
+pub const SYS_MSGQ_CREATE: u64 = 38;
+pub const SYS_MSGQ_SEND: u64 = 39;
+pub const SYS_MSGQ_RECV: u64 = 40;
+pub const SYS_MSGQ_CLOSE: u64 = 41;
+pub const SYS_SIGPROCMASK: u64 = 42;
+pub const SYS_SIGPENDING: u64 = 43;
+pub const SYS_SIGACTION: u64 = 44;
+pub const SYS_SIGRETURN: u64 = 45;
+pub const SYS_GETPGRP: u64 = 46;
+pub const SYS_SETPGID: u64 = 47;
+pub const SYS_GETSID: u64 = 48;
+pub const SYS_SETSID: u64 = 49;
 
 pub const ABI_VERSION_MAJOR: u64 = 1;
-pub const ABI_VERSION_MINOR: u64 = 1;
+pub const ABI_VERSION_MINOR: u64 = 10;
 pub const ABI_VERSION: u64 = (ABI_VERSION_MAJOR << 32) | ABI_VERSION_MINOR;
 
 pub const SYSCALL_RETURN_TO_KERNEL: u64 = u64::MAX;
@@ -51,6 +70,13 @@ const MIN_USER_THREAD_STACK_SIZE: u64 = 1024;
 const MAX_USER_THREAD_STACK_SIZE: u64 = 64 * 1024;
 const MAX_OPEN_FILES: usize = 16;
 const OPEN_FILE_BUFFER_SIZE: usize = 256;
+const MAX_PIPES: usize = 8;
+const PIPE_CAPACITY: usize = 256;
+const MAX_EVENTS: usize = 16;
+const MAX_EVENT_WAITERS: usize = crate::user::thread::MAX_THREADS_PER_PROCESS;
+const MAX_MESSAGE_QUEUES: usize = 8;
+const MESSAGE_QUEUE_DEPTH: usize = 8;
+const MAX_MESSAGE_SIZE: usize = 64;
 const STDIN: u64 = 0;
 const FIRST_USER_FD: u64 = 3;
 
@@ -61,9 +87,22 @@ static USER_YIELDS: AtomicU64 = AtomicU64::new(0);
 struct OpenFile {
     pid: crate::user::process::Pid,
     fd: u64,
-    path: &'static str,
-    data: OpenFileData,
-    offset: usize,
+    descriptor: Descriptor,
+}
+
+#[derive(Debug, Clone, Copy)]
+enum Descriptor {
+    File {
+        path: &'static str,
+        data: OpenFileData,
+        offset: usize,
+    },
+    PipeRead {
+        pipe_id: u64,
+    },
+    PipeWrite {
+        pipe_id: u64,
+    },
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -97,6 +136,195 @@ impl OpenFileData {
 }
 
 static OPEN_FILES: Mutex<[Option<OpenFile>; MAX_OPEN_FILES]> = Mutex::new([None; MAX_OPEN_FILES]);
+static PIPES: Mutex<[Option<Pipe>; MAX_PIPES]> = Mutex::new([None; MAX_PIPES]);
+static NEXT_PIPE_ID: AtomicU64 = AtomicU64::new(1);
+static EVENTS: Mutex<[Option<Event>; MAX_EVENTS]> = Mutex::new([None; MAX_EVENTS]);
+static NEXT_EVENT_ID: AtomicU64 = AtomicU64::new(1);
+static MESSAGE_QUEUES: Mutex<[Option<MessageQueue>; MAX_MESSAGE_QUEUES]> =
+    Mutex::new([None; MAX_MESSAGE_QUEUES]);
+static NEXT_MESSAGE_QUEUE_ID: AtomicU64 = AtomicU64::new(1);
+
+#[derive(Debug, Clone, Copy)]
+struct Pipe {
+    id: u64,
+    owner_pid: crate::user::process::Pid,
+    bytes: [u8; PIPE_CAPACITY],
+    read_index: usize,
+    len: usize,
+    readers: u8,
+    writers: u8,
+}
+
+impl Pipe {
+    const fn new(id: u64, owner_pid: crate::user::process::Pid) -> Self {
+        Self {
+            id,
+            owner_pid,
+            bytes: [0; PIPE_CAPACITY],
+            read_index: 0,
+            len: 0,
+            readers: 1,
+            writers: 1,
+        }
+    }
+
+    fn write(&mut self, source: &[u8]) -> Result<usize, SyscallError> {
+        if self.readers == 0 {
+            return Err(SyscallError::InvalidArgument);
+        }
+        if self.len == PIPE_CAPACITY {
+            return Err(SyscallError::WouldBlock);
+        }
+
+        let count = source.len().min(PIPE_CAPACITY - self.len);
+        for &byte in &source[..count] {
+            let write_index = (self.read_index + self.len) % PIPE_CAPACITY;
+            self.bytes[write_index] = byte;
+            self.len += 1;
+        }
+        Ok(count)
+    }
+
+    fn read(&mut self, destination: &mut [u8]) -> Result<usize, SyscallError> {
+        if self.len == 0 {
+            return if self.writers == 0 {
+                Ok(0)
+            } else {
+                Err(SyscallError::WouldBlock)
+            };
+        }
+
+        let count = destination.len().min(self.len);
+        for slot in &mut destination[..count] {
+            *slot = self.bytes[self.read_index];
+            self.read_index = (self.read_index + 1) % PIPE_CAPACITY;
+            self.len -= 1;
+        }
+        Ok(count)
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+struct Event {
+    id: u64,
+    owner_pid: crate::user::process::Pid,
+    signaled: bool,
+    waiters: [Option<crate::user::thread::Tid>; MAX_EVENT_WAITERS],
+    waiter_count: usize,
+}
+
+impl Event {
+    const fn new(id: u64, owner_pid: crate::user::process::Pid) -> Self {
+        Self {
+            id,
+            owner_pid,
+            signaled: false,
+            waiters: [None; MAX_EVENT_WAITERS],
+            waiter_count: 0,
+        }
+    }
+
+    fn enqueue(&mut self, tid: crate::user::thread::Tid) -> bool {
+        if self.waiter_count == self.waiters.len()
+            || self.waiters[..self.waiter_count].contains(&Some(tid))
+        {
+            return false;
+        }
+        self.waiters[self.waiter_count] = Some(tid);
+        self.waiter_count += 1;
+        true
+    }
+
+    fn dequeue(&mut self) -> Option<crate::user::thread::Tid> {
+        let tid = self.waiters[0]?;
+        for index in 1..self.waiter_count {
+            self.waiters[index - 1] = self.waiters[index];
+        }
+        self.waiter_count -= 1;
+        self.waiters[self.waiter_count] = None;
+        Some(tid)
+    }
+
+    fn remove(&mut self, tid: crate::user::thread::Tid) {
+        let Some(position) = self.waiters[..self.waiter_count]
+            .iter()
+            .position(|waiter| *waiter == Some(tid))
+        else {
+            return;
+        };
+        for index in position + 1..self.waiter_count {
+            self.waiters[index - 1] = self.waiters[index];
+        }
+        self.waiter_count -= 1;
+        self.waiters[self.waiter_count] = None;
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+struct Message {
+    bytes: [u8; MAX_MESSAGE_SIZE],
+    len: usize,
+}
+
+impl Message {
+    const EMPTY: Self = Self {
+        bytes: [0; MAX_MESSAGE_SIZE],
+        len: 0,
+    };
+}
+
+#[derive(Debug, Clone, Copy)]
+struct MessageQueue {
+    id: u64,
+    owner_pid: crate::user::process::Pid,
+    messages: [Message; MESSAGE_QUEUE_DEPTH],
+    read_index: usize,
+    len: usize,
+}
+
+impl MessageQueue {
+    const fn new(id: u64, owner_pid: crate::user::process::Pid) -> Self {
+        Self {
+            id,
+            owner_pid,
+            messages: [Message::EMPTY; MESSAGE_QUEUE_DEPTH],
+            read_index: 0,
+            len: 0,
+        }
+    }
+
+    fn send(&mut self, source: &[u8]) -> Result<usize, SyscallError> {
+        if source.is_empty() || source.len() > MAX_MESSAGE_SIZE {
+            return Err(SyscallError::InvalidArgument);
+        }
+        if self.len == MESSAGE_QUEUE_DEPTH {
+            return Err(SyscallError::WouldBlock);
+        }
+
+        let index = (self.read_index + self.len) % MESSAGE_QUEUE_DEPTH;
+        self.messages[index].bytes[..source.len()].copy_from_slice(source);
+        self.messages[index].len = source.len();
+        self.len += 1;
+        Ok(source.len())
+    }
+
+    fn receive(&mut self, destination: &mut [u8]) -> Result<usize, SyscallError> {
+        if self.len == 0 {
+            return Err(SyscallError::WouldBlock);
+        }
+        let message = &self.messages[self.read_index];
+        if destination.len() < message.len {
+            return Err(SyscallError::InvalidArgument);
+        }
+
+        let count = message.len;
+        destination[..count].copy_from_slice(&message.bytes[..count]);
+        self.messages[self.read_index] = Message::EMPTY;
+        self.read_index = (self.read_index + 1) % MESSAGE_QUEUE_DEPTH;
+        self.len -= 1;
+        Ok(count)
+    }
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum UserAccess {
@@ -119,10 +347,7 @@ impl UserRange {
         }
 
         let end = ptr.checked_add(len).ok_or(SyscallError::InvalidArgument)?;
-        let Some(layout) = crate::user::process::current_user_layout() else {
-            return Err(SyscallError::InvalidArgument);
-        };
-        if !range_inside_layout(ptr, end, layout) {
+        if !crate::user::process::current_user_range_owned(ptr, end) {
             return Err(SyscallError::InvalidArgument);
         }
 
@@ -267,6 +492,7 @@ pub enum SyscallError {
     NoSuchProcess = -4,
     NotChild = -5,
     WouldBlock = -6,
+    PermissionDenied = -7,
 }
 
 const _: () = {
@@ -274,6 +500,25 @@ const _: () = {
     assert!(SYS_DRIVER_STATUS == 27);
     assert!(SYS_ABI_INFO == 28);
     assert!(SYS_THREAD_EXIT == 30);
+    assert!(SYS_THREAD_JOIN == 31);
+    assert!(SYS_THREAD_SPAWN == 32);
+    assert!(SYS_PIPE == 33);
+    assert!(SYS_EVENT_CREATE == 34);
+    assert!(SYS_EVENT_WAIT == 35);
+    assert!(SYS_EVENT_SIGNAL == 36);
+    assert!(SYS_EVENT_CLOSE == 37);
+    assert!(SYS_MSGQ_CREATE == 38);
+    assert!(SYS_MSGQ_SEND == 39);
+    assert!(SYS_MSGQ_RECV == 40);
+    assert!(SYS_MSGQ_CLOSE == 41);
+    assert!(SYS_SIGPROCMASK == 42);
+    assert!(SYS_SIGPENDING == 43);
+    assert!(SYS_SIGACTION == 44);
+    assert!(SYS_SIGRETURN == 45);
+    assert!(SYS_GETPGRP == 46);
+    assert!(SYS_SETPGID == 47);
+    assert!(SYS_GETSID == 48);
+    assert!(SYS_SETSID == 49);
     assert!(SyscallError::UnknownSyscall as i64 == -1);
     assert!(SyscallError::WouldBlock as i64 == -6);
 };
@@ -355,6 +600,13 @@ pub extern "C" fn syscall_interrupt_dispatch(frame: &SyscallFrame) -> u64 {
         };
     }
 
+    if frame.number == SYS_THREAD_JOIN {
+        return match join_user_thread(frame) {
+            Ok(value) => value,
+            Err(err) => err as i64 as u64,
+        };
+    }
+
     if frame.number == SYS_WRITE {
         return match write_user_buffer(frame.arg0, frame.arg1, frame.arg2) {
             Ok(bytes_written) => bytes_written,
@@ -373,6 +625,24 @@ pub extern "C" fn syscall_interrupt_dispatch(frame: &SyscallFrame) -> u64 {
         return match sleep_current_user(frame) {
             Ok(value) => value,
             Err(err) => err as i64 as u64,
+        };
+    }
+
+    if frame.number == SYS_SIGPROCMASK {
+        return match update_signal_mask(frame) {
+            Ok(SignalMaskSyscall::Updated(old_mask)) => old_mask,
+            Ok(SignalMaskSyscall::ContextSwitch) => SYSCALL_RETURN_TO_KERNEL,
+            Err(err) => err as i64 as u64,
+        };
+    }
+
+    if frame.number == SYS_SIGRETURN {
+        return match crate::user::process::checkout_current_user_after_sigreturn() {
+            Some((pid, tid)) => {
+                crate::serial_println!("[SIGNAL] sigreturn pid={} tid={}", pid, tid);
+                SYSCALL_RETURN_TO_KERNEL
+            }
+            None => SyscallError::InvalidArgument as i64 as u64,
         };
     }
 
@@ -400,10 +670,12 @@ pub extern "C" fn user_exit_landing() -> ! {
 
     if let Some(blocked) = crate::user::process::checkout_current_user_if_blocked() {
         crate::serial_println!(
-            "[USER] blocked pid={} {} waiting_for={:?} resume={:?}; returned to kernel scheduler",
+            "[USER] blocked pid={} tid={} {} waiting_for_pid={:?} waiting_for_tid={:?} resume={:?}; returned to kernel scheduler",
             blocked.pid,
+            blocked.tid,
             blocked.name,
             blocked.waiting_for,
+            blocked.waiting_for_thread,
             blocked.resume_context
         );
         maintain_process_table();
@@ -422,12 +694,6 @@ pub extern "C" fn user_exit_landing() -> ! {
     }
 
     maintain_process_table();
-
-    crate::interrupts::enable();
-    if let Some(resume) = schedule_ready_user() {
-        resume_scheduled_user(resume, resume.resume_context.rax);
-    }
-
     let last_exit = crate::user::process::last_exit_summary();
     match last_exit {
         Some((pid, name, status)) => {
@@ -441,6 +707,9 @@ pub extern "C" fn user_exit_landing() -> ! {
     crate::interrupts::enable();
     update_user_shell_respawn(last_exit);
     maintain_process_table();
+    if let Some(resume) = schedule_ready_user() {
+        resume_scheduled_user(resume, resume.resume_context.rax);
+    }
     if !crate::user::program::has_pending() {
         crate::shell::init();
     }
@@ -451,6 +720,7 @@ fn update_user_shell_respawn(last_exit: Option<(crate::user::process::Pid, &'sta
     let Some((child_pid, _, _)) = last_exit else {
         return;
     };
+    crate::user::process::clear_terminal_foreground_job(child_pid);
 
     let Some(request) = crate::user::program::take_user_shell_wait_request_for_child(child_pid)
     else {
@@ -605,7 +875,7 @@ pub fn dispatch(frame: SyscallFrame) -> Result<u64, SyscallError> {
         SYS_EXEC_BG => exec_background_user_program(frame.arg0, frame.arg1, frame.arg2, frame.arg3),
         SYS_WAITPID => wait_for_pending_child(&frame),
         SYS_PROCS => procs_to_user(frame.arg0, frame.arg1),
-        SYS_KILL => kill_process_placeholder(frame.arg0, frame.arg1),
+        SYS_KILL => terminate_process(frame.arg0, frame.arg1),
         SYS_GETCWD => getcwd_to_user(frame.arg0, frame.arg1),
         SYS_CHDIR => chdir_user(frame.arg0, frame.arg1),
         SYS_SETUSER => set_current_user(frame.arg0, frame.arg1),
@@ -617,11 +887,59 @@ pub fn dispatch(frame: SyscallFrame) -> Result<u64, SyscallError> {
         SYS_ABI_INFO => Ok(ABI_VERSION),
         SYS_THREAD_CREATE => create_user_thread(frame.arg0, frame.arg1, frame.arg2, frame.arg3),
         SYS_THREAD_EXIT => Err(SyscallError::NotImplemented),
+        SYS_THREAD_JOIN => Err(SyscallError::NotImplemented),
+        SYS_THREAD_SPAWN => spawn_user_thread(frame.arg0, frame.arg1),
+        SYS_PIPE => create_pipe(frame.arg0, frame.arg1),
+        SYS_EVENT_CREATE => create_event(),
+        SYS_EVENT_WAIT => wait_event(frame.arg0, &frame),
+        SYS_EVENT_SIGNAL => signal_event(frame.arg0),
+        SYS_EVENT_CLOSE => close_event(frame.arg0),
+        SYS_MSGQ_CREATE => create_message_queue(),
+        SYS_MSGQ_SEND => send_message(frame.arg0, frame.arg1, frame.arg2),
+        SYS_MSGQ_RECV => receive_message(frame.arg0, frame.arg1, frame.arg2),
+        SYS_MSGQ_CLOSE => close_message_queue(frame.arg0),
+        SYS_SIGPROCMASK => Err(SyscallError::NotImplemented),
+        SYS_SIGPENDING => current_pending_signals(),
+        SYS_SIGACTION => set_signal_action(frame.arg0, frame.arg1),
+        SYS_SIGRETURN => Err(SyscallError::NotImplemented),
+        SYS_GETPGRP => current_process_group(),
+        SYS_SETPGID => set_process_group(frame.arg0, frame.arg1),
+        SYS_GETSID => get_session_id(frame.arg0),
+        SYS_SETSID => create_session(),
         SYS_SLEEP_MS => Err(SyscallError::NotImplemented),
         SYS_YIELD => Err(SyscallError::NotImplemented),
         SYS_EXIT => Err(SyscallError::NotImplemented),
         SYS_WRITE => write_user_buffer(frame.arg0, frame.arg1, frame.arg2),
         _ => Err(SyscallError::UnknownSyscall),
+    }
+}
+
+fn spawn_user_thread(entry: u64, arg: u64) -> Result<u64, SyscallError> {
+    let layout =
+        crate::user::process::current_user_layout().ok_or(SyscallError::InvalidArgument)?;
+    if entry < layout.program_start || entry >= layout.program_end {
+        return Err(SyscallError::InvalidArgument);
+    }
+    UserRange::checked(entry, 1, UserAccess::Read)?;
+    crate::user::process::create_current_managed_user_thread(entry, arg)
+        .map(u64::from)
+        .ok_or(SyscallError::InvalidArgument)
+}
+
+fn join_user_thread(frame: &SyscallFrame) -> Result<u64, SyscallError> {
+    let target_tid = crate::user::thread::Tid::try_from(frame.arg0)
+        .map_err(|_| SyscallError::InvalidArgument)?;
+    let resume_context = crate::user::process::UserResumeContext::from_syscall_frame(frame);
+    match crate::user::process::join_current_thread(target_tid, resume_context) {
+        crate::user::process::ThreadJoinStatus::Completed => Ok(0),
+        crate::user::process::ThreadJoinStatus::Blocked => Ok(SYSCALL_RETURN_TO_KERNEL),
+        crate::user::process::ThreadJoinStatus::Missing
+        | crate::user::process::ThreadJoinStatus::NotSibling
+        | crate::user::process::ThreadJoinStatus::SelfJoin
+        | crate::user::process::ThreadJoinStatus::Deadlock
+        | crate::user::process::ThreadJoinStatus::AlreadyReaped => {
+            Err(SyscallError::InvalidArgument)
+        }
     }
 }
 
@@ -742,15 +1060,15 @@ fn uptime_to_user(out_ptr: u64, out_len: u64) -> Result<u64, SyscallError> {
 }
 
 fn write_user_buffer(fd: u64, ptr: u64, len: u64) -> Result<u64, SyscallError> {
-    if fd != 1 && fd != 2 {
-        return Err(SyscallError::InvalidArgument);
-    }
-
     if len > MAX_WRITE_LEN {
         return Err(SyscallError::InvalidArgument);
     }
 
     let bytes = read_user_bytes(ptr, len)?;
+    if fd != 1 && fd != 2 {
+        return write_pipe(fd, bytes).map(|written| written as u64);
+    }
+
     match str::from_utf8(bytes) {
         Ok(text) => {
             crate::serial_print!("{}", text);
@@ -891,9 +1209,11 @@ fn open_file(path_ptr: u64, path_len: u64) -> Result<u64, SyscallError> {
     *slot = Some(OpenFile {
         pid,
         fd,
-        path: open_path,
-        data,
-        offset: 0,
+        descriptor: Descriptor::File {
+            path: open_path,
+            data,
+            offset: 0,
+        },
     });
 
     crate::serial_println!("[FD] pid={} open {} -> fd={}", pid, open_path, fd);
@@ -918,18 +1238,28 @@ fn read_fd_to_user(fd: u64, out_ptr: u64, out_len: u64) -> Result<u64, SyscallEr
     let pid = crate::user::process::current_user_pid().ok_or(SyscallError::InvalidArgument)?;
 
     let mut files = OPEN_FILES.lock();
-    let file = files
+    let descriptor = files
         .iter_mut()
         .filter_map(Option::as_mut)
         .find(|file| file.pid == pid && file.fd == fd)
+        .map(|file| &mut file.descriptor)
         .ok_or(SyscallError::InvalidArgument)?;
 
-    let remaining = file.data.len().saturating_sub(file.offset);
-    let count = remaining.min(out_len as usize);
-    file.data
-        .copy_to_user(file.offset, out.as_ptr() as u64, count);
-    file.offset += count;
-    Ok(count as u64)
+    match descriptor {
+        Descriptor::File { data, offset, .. } => {
+            let remaining = data.len().saturating_sub(*offset);
+            let count = remaining.min(out_len as usize);
+            data.copy_to_user(*offset, out.as_ptr() as u64, count);
+            *offset += count;
+            Ok(count as u64)
+        }
+        Descriptor::PipeRead { pipe_id } => {
+            let pipe_id = *pipe_id;
+            drop(files);
+            read_pipe(pipe_id, pid, out).map(|count| count as u64)
+        }
+        Descriptor::PipeWrite { .. } => Err(SyscallError::InvalidArgument),
+    }
 }
 
 fn normalize_open_path(path: &str) -> Result<&'static str, SyscallError> {
@@ -968,6 +1298,260 @@ fn append_to_buffer(
     }
     buffer[offset..end].copy_from_slice(data);
     Ok(end)
+}
+
+fn create_pipe(out_ptr: u64, out_len: u64) -> Result<u64, SyscallError> {
+    if out_len < core::mem::size_of::<[u64; 2]>() as u64 {
+        return Err(SyscallError::InvalidArgument);
+    }
+    let out = user_write_range(out_ptr, core::mem::size_of::<[u64; 2]>() as u64)?;
+    let pid = crate::user::process::current_user_pid().ok_or(SyscallError::InvalidArgument)?;
+
+    let mut files = OPEN_FILES.lock();
+    let read_fd = next_fd_for_pid(&files, pid).ok_or(SyscallError::InvalidArgument)?;
+    let write_fd =
+        next_fd_for_pid_excluding(&files, pid, read_fd).ok_or(SyscallError::InvalidArgument)?;
+    let read_slot = files
+        .iter()
+        .position(Option::is_none)
+        .ok_or(SyscallError::InvalidArgument)?;
+    let write_slot = files
+        .iter()
+        .enumerate()
+        .find(|(index, entry)| *index != read_slot && entry.is_none())
+        .map(|(index, _)| index)
+        .ok_or(SyscallError::InvalidArgument)?;
+
+    let pipe_id = NEXT_PIPE_ID.fetch_add(1, Ordering::Relaxed);
+    let mut pipes = PIPES.lock();
+    let pipe_slot = pipes
+        .iter_mut()
+        .find(|pipe| pipe.is_none())
+        .ok_or(SyscallError::WouldBlock)?;
+    *pipe_slot = Some(Pipe::new(pipe_id, pid));
+    files[read_slot] = Some(OpenFile {
+        pid,
+        fd: read_fd,
+        descriptor: Descriptor::PipeRead { pipe_id },
+    });
+    files[write_slot] = Some(OpenFile {
+        pid,
+        fd: write_fd,
+        descriptor: Descriptor::PipeWrite { pipe_id },
+    });
+
+    out[..8].copy_from_slice(&read_fd.to_ne_bytes());
+    out[8..16].copy_from_slice(&write_fd.to_ne_bytes());
+    crate::serial_println!(
+        "[PIPE] pid={} create id={} read_fd={} write_fd={}",
+        pid,
+        pipe_id,
+        read_fd,
+        write_fd
+    );
+    Ok(0)
+}
+
+fn write_pipe(fd: u64, source: &[u8]) -> Result<usize, SyscallError> {
+    let pid = crate::user::process::current_user_pid().ok_or(SyscallError::InvalidArgument)?;
+    let pipe_id = OPEN_FILES
+        .lock()
+        .iter()
+        .flatten()
+        .find(|file| file.pid == pid && file.fd == fd)
+        .and_then(|file| match file.descriptor {
+            Descriptor::PipeWrite { pipe_id } => Some(pipe_id),
+            _ => None,
+        })
+        .ok_or(SyscallError::InvalidArgument)?;
+
+    let mut pipes = PIPES.lock();
+    let pipe = pipes
+        .iter_mut()
+        .flatten()
+        .find(|pipe| pipe.id == pipe_id && pipe.owner_pid == pid)
+        .ok_or(SyscallError::InvalidArgument)?;
+    pipe.write(source)
+}
+
+fn read_pipe(
+    pipe_id: u64,
+    pid: crate::user::process::Pid,
+    destination: &mut [u8],
+) -> Result<usize, SyscallError> {
+    let mut pipes = PIPES.lock();
+    let pipe = pipes
+        .iter_mut()
+        .flatten()
+        .find(|pipe| pipe.id == pipe_id && pipe.owner_pid == pid)
+        .ok_or(SyscallError::InvalidArgument)?;
+    pipe.read(destination)
+}
+
+fn create_event() -> Result<u64, SyscallError> {
+    let pid = crate::user::process::current_user_pid().ok_or(SyscallError::InvalidArgument)?;
+    let id = NEXT_EVENT_ID.fetch_add(1, Ordering::Relaxed);
+    let mut events = EVENTS.lock();
+    let slot = events
+        .iter_mut()
+        .find(|event| event.is_none())
+        .ok_or(SyscallError::WouldBlock)?;
+    *slot = Some(Event::new(id, pid));
+    crate::serial_println!("[EVENT] pid={} create id={}", pid, id);
+    Ok(id)
+}
+
+fn wait_event(handle: u64, frame: &SyscallFrame) -> Result<u64, SyscallError> {
+    let pid = crate::user::process::current_user_pid().ok_or(SyscallError::InvalidArgument)?;
+    let tid = crate::user::process::current_user_tid().ok_or(SyscallError::InvalidArgument)?;
+    let mut events = EVENTS.lock();
+    let event = events
+        .iter_mut()
+        .flatten()
+        .find(|event| event.id == handle && event.owner_pid == pid)
+        .ok_or(SyscallError::InvalidArgument)?;
+
+    if event.signaled {
+        event.signaled = false;
+        return Ok(0);
+    }
+    if !event.enqueue(tid) {
+        return Err(SyscallError::WouldBlock);
+    }
+
+    let resume_context = crate::user::process::UserResumeContext::from_syscall_frame(frame);
+    if crate::user::process::block_current_thread(resume_context).is_none() {
+        event.remove(tid);
+        return Err(SyscallError::InvalidArgument);
+    }
+    crate::serial_println!(
+        "[EVENT] pid={} wait id={} tid={} queued={}",
+        pid,
+        handle,
+        tid,
+        event.waiter_count
+    );
+    Ok(SYSCALL_RETURN_TO_KERNEL)
+}
+
+fn signal_event(handle: u64) -> Result<u64, SyscallError> {
+    let pid = crate::user::process::current_user_pid().ok_or(SyscallError::InvalidArgument)?;
+    let mut events = EVENTS.lock();
+    let event = events
+        .iter_mut()
+        .flatten()
+        .find(|event| event.id == handle && event.owner_pid == pid)
+        .ok_or(SyscallError::InvalidArgument)?;
+
+    while let Some(tid) = event.dequeue() {
+        if crate::user::process::wake_thread(tid, 0) {
+            crate::serial_println!(
+                "[EVENT] pid={} signal id={} woke_tid={} queued={}",
+                pid,
+                handle,
+                tid,
+                event.waiter_count
+            );
+            return Ok(1);
+        }
+    }
+    event.signaled = true;
+    crate::serial_println!("[EVENT] pid={} signal id={} latched=1", pid, handle);
+    Ok(0)
+}
+
+fn close_event(handle: u64) -> Result<u64, SyscallError> {
+    let pid = crate::user::process::current_user_pid().ok_or(SyscallError::InvalidArgument)?;
+    let mut events = EVENTS.lock();
+    let slot = events
+        .iter_mut()
+        .find(|event| {
+            event
+                .as_ref()
+                .is_some_and(|event| event.id == handle && event.owner_pid == pid)
+        })
+        .ok_or(SyscallError::InvalidArgument)?;
+    if slot.as_ref().is_some_and(|event| event.waiter_count != 0) {
+        return Err(SyscallError::WouldBlock);
+    }
+    *slot = None;
+    crate::serial_println!("[EVENT] pid={} close id={}", pid, handle);
+    Ok(0)
+}
+
+fn create_message_queue() -> Result<u64, SyscallError> {
+    let pid = crate::user::process::current_user_pid().ok_or(SyscallError::InvalidArgument)?;
+    let id = NEXT_MESSAGE_QUEUE_ID.fetch_add(1, Ordering::Relaxed);
+    let mut queues = MESSAGE_QUEUES.lock();
+    let slot = queues
+        .iter_mut()
+        .find(|queue| queue.is_none())
+        .ok_or(SyscallError::WouldBlock)?;
+    *slot = Some(MessageQueue::new(id, pid));
+    crate::serial_println!("[MSGQ] pid={} create id={}", pid, id);
+    Ok(id)
+}
+
+fn send_message(handle: u64, ptr: u64, len: u64) -> Result<u64, SyscallError> {
+    if len == 0 || len > MAX_MESSAGE_SIZE as u64 {
+        return Err(SyscallError::InvalidArgument);
+    }
+    let source = read_user_bytes(ptr, len)?;
+    let pid = crate::user::process::current_user_pid().ok_or(SyscallError::InvalidArgument)?;
+    let mut queues = MESSAGE_QUEUES.lock();
+    let queue = queues
+        .iter_mut()
+        .flatten()
+        .find(|queue| queue.id == handle && queue.owner_pid == pid)
+        .ok_or(SyscallError::InvalidArgument)?;
+    let count = queue.send(source)?;
+    crate::serial_println!(
+        "[MSGQ] pid={} send id={} bytes={} depth={}",
+        pid,
+        handle,
+        count,
+        queue.len
+    );
+    Ok(count as u64)
+}
+
+fn receive_message(handle: u64, ptr: u64, len: u64) -> Result<u64, SyscallError> {
+    if len == 0 || len > MAX_MESSAGE_SIZE as u64 {
+        return Err(SyscallError::InvalidArgument);
+    }
+    let destination = user_write_range(ptr, len)?;
+    let pid = crate::user::process::current_user_pid().ok_or(SyscallError::InvalidArgument)?;
+    let mut queues = MESSAGE_QUEUES.lock();
+    let queue = queues
+        .iter_mut()
+        .flatten()
+        .find(|queue| queue.id == handle && queue.owner_pid == pid)
+        .ok_or(SyscallError::InvalidArgument)?;
+    let count = queue.receive(destination)?;
+    crate::serial_println!(
+        "[MSGQ] pid={} recv id={} bytes={} depth={}",
+        pid,
+        handle,
+        count,
+        queue.len
+    );
+    Ok(count as u64)
+}
+
+fn close_message_queue(handle: u64) -> Result<u64, SyscallError> {
+    let pid = crate::user::process::current_user_pid().ok_or(SyscallError::InvalidArgument)?;
+    let mut queues = MESSAGE_QUEUES.lock();
+    let slot = queues
+        .iter_mut()
+        .find(|queue| {
+            queue
+                .as_ref()
+                .is_some_and(|queue| queue.id == handle && queue.owner_pid == pid)
+        })
+        .ok_or(SyscallError::InvalidArgument)?;
+    *slot = None;
+    crate::serial_println!("[MSGQ] pid={} close id={}", pid, handle);
+    Ok(0)
 }
 
 fn close_fd(fd: u64) -> Result<u64, SyscallError> {
@@ -1201,23 +1785,261 @@ fn driver_status_to_user(out_ptr: u64, out_len: u64) -> Result<u64, SyscallError
     Ok(crate::drivers::status::write_to_buffer(out) as u64)
 }
 
-fn kill_process_placeholder(pid: u64, signal: u64) -> Result<u64, SyscallError> {
+fn terminate_process(pid: u64, signal: u64) -> Result<u64, SyscallError> {
     let pid = u32::try_from(pid).map_err(|_| SyscallError::InvalidArgument)?;
-    if !crate::user::process::contains_pid(pid) {
+    if signal == crate::user::process::SIGCONT {
+        let caller_pid =
+            crate::user::process::current_user_pid().ok_or(SyscallError::InvalidArgument)?;
+        if crate::user::process::continue_process(caller_pid, pid) {
+            crate::serial_println!("[SIGNAL] continued pid={} signal={}", pid, signal);
+            return Ok(0);
+        }
+        return Err(SyscallError::InvalidArgument);
+    }
+    if signal != crate::user::process::SIGTERM {
         crate::serial_println!(
-            "[USER] kill placeholder rejected pid={} signal={} reason=no such process",
+            "[SIGNAL] rejected pid={} signal={} reason=unsupported",
             pid,
             signal
         );
-        return Err(SyscallError::NoSuchProcess);
+        return Err(SyscallError::InvalidArgument);
+    }
+    let caller_pid =
+        crate::user::process::current_user_pid().ok_or(SyscallError::InvalidArgument)?;
+
+    match crate::user::process::send_signal(caller_pid, pid, signal) {
+        Ok(crate::user::process::SignalDelivery::Pending {
+            pid,
+            name,
+            signal,
+            pending_signals,
+        }) => {
+            crate::serial_println!(
+                "[SIGNAL] pending caller={} pid={} name={} signal={} pending={:#x}",
+                caller_pid,
+                pid,
+                name,
+                signal,
+                pending_signals
+            );
+            Ok(1)
+        }
+        Ok(crate::user::process::SignalDelivery::Handled {
+            pid,
+            name,
+            signal,
+            handler,
+        }) => {
+            crate::serial_println!(
+                "[SIGNAL] handler queued caller={} pid={} name={} signal={} handler={:#x}",
+                caller_pid,
+                pid,
+                name,
+                signal,
+                handler
+            );
+            Ok(0)
+        }
+        Ok(crate::user::process::SignalDelivery::Ignored { pid, name, signal }) => {
+            crate::serial_println!(
+                "[SIGNAL] ignored caller={} pid={} name={} signal={}",
+                caller_pid,
+                pid,
+                name,
+                signal
+            );
+            Ok(0)
+        }
+        Ok(crate::user::process::SignalDelivery::Terminated(report)) => {
+            crate::serial_println!(
+                "[SIGNAL] delivered caller={} pid={} name={} signal={} status={} job={:?} parent={:?} parent_woken={}",
+                caller_pid,
+                report.pid,
+                report.name,
+                signal,
+                report.status,
+                report.job_mode,
+                report.parent_pid,
+                report.parent_woken
+            );
+            Ok(0)
+        }
+        Err(err) => {
+            crate::serial_println!(
+                "[SIGNAL] rejected caller={} pid={} signal={} reason={:?}",
+                caller_pid,
+                pid,
+                signal,
+                err
+            );
+            match err {
+                crate::user::process::SignalTerminationError::Missing
+                | crate::user::process::SignalTerminationError::AlreadyExited => {
+                    Err(SyscallError::NoSuchProcess)
+                }
+                crate::user::process::SignalTerminationError::PermissionDenied
+                | crate::user::process::SignalTerminationError::KernelTask => {
+                    Err(SyscallError::PermissionDenied)
+                }
+                crate::user::process::SignalTerminationError::SelfTarget => {
+                    Err(SyscallError::InvalidArgument)
+                }
+            }
+        }
+    }
+}
+
+enum SignalMaskSyscall {
+    Updated(u64),
+    ContextSwitch,
+}
+
+fn update_signal_mask(frame: &SyscallFrame) -> Result<SignalMaskSyscall, SyscallError> {
+    const SIG_BLOCK: u64 = 0;
+    const SIG_UNBLOCK: u64 = 1;
+    const SIG_SETMASK: u64 = 2;
+
+    let mask = frame.arg1;
+    if mask & !crate::user::process::SIGTERM_MASK != 0 {
+        return Err(SyscallError::InvalidArgument);
+    }
+    let how = match frame.arg0 {
+        SIG_BLOCK => crate::user::process::SignalMaskHow::Block,
+        SIG_UNBLOCK => crate::user::process::SignalMaskHow::Unblock,
+        SIG_SETMASK => crate::user::process::SignalMaskHow::SetMask,
+        _ => return Err(SyscallError::InvalidArgument),
+    };
+    let pid = crate::user::process::current_user_pid().ok_or(SyscallError::InvalidArgument)?;
+    let update = crate::user::process::update_current_signal_mask(how, mask)
+        .ok_or(SyscallError::InvalidArgument)?;
+    crate::serial_println!(
+        "[SIGNAL] mask pid={} how={:?} old={:#x} new={:#x} delivered={:?}",
+        pid,
+        how,
+        update.old_mask,
+        update.new_mask,
+        update.delivered_signal
+    );
+
+    if let Some(signal) = update.delivered_signal {
+        let disposition = crate::user::process::current_signal_disposition(signal)
+            .ok_or(SyscallError::InvalidArgument)?;
+        if disposition == crate::user::process::SIG_IGN {
+            crate::serial_println!(
+                "[SIGNAL] discarded ignored pending pid={} signal={}",
+                pid,
+                signal
+            );
+        } else if disposition == crate::user::process::SIG_DFL {
+            let status = 128 + signal;
+            let exited = crate::user::process::mark_current_user_exited(status);
+            crate::serial_println!(
+                "[SIGNAL] delivered pending pid={:?} signal={} status={}",
+                exited,
+                signal,
+                status
+            );
+            return Ok(SignalMaskSyscall::ContextSwitch);
+        } else {
+            let mut original = crate::user::process::UserResumeContext::from_syscall_frame(frame);
+            original.rax = update.old_mask;
+            let report = crate::user::process::checkout_current_user_for_signal_handler(
+                signal,
+                disposition,
+                original,
+            )
+            .ok_or(SyscallError::InvalidArgument)?;
+            crate::serial_println!(
+                "[SIGNAL] entering handler pid={} tid={} signal={} handler={:#x}",
+                report.pid,
+                report.tid,
+                report.signal,
+                report.handler
+            );
+            return Ok(SignalMaskSyscall::ContextSwitch);
+        }
     }
 
+    Ok(SignalMaskSyscall::Updated(update.old_mask))
+}
+
+fn set_signal_action(signal: u64, disposition: u64) -> Result<u64, SyscallError> {
+    if signal != crate::user::process::SIGTERM {
+        return Err(SyscallError::InvalidArgument);
+    }
+    if disposition > crate::user::process::SIG_IGN {
+        let layout =
+            crate::user::process::current_user_layout().ok_or(SyscallError::InvalidArgument)?;
+        if disposition < layout.program_start || disposition >= layout.program_end {
+            return Err(SyscallError::InvalidArgument);
+        }
+        UserRange::checked(disposition, 1, UserAccess::Read)?;
+    }
+    let old = crate::user::process::set_current_signal_disposition(signal, disposition)
+        .ok_or(SyscallError::InvalidArgument)?;
     crate::serial_println!(
-        "[USER] kill placeholder accepted pid={} signal={} delivery=pending",
-        pid,
-        signal
+        "[SIGNAL] sigaction pid={:?} signal={} old={:#x} new={:#x}",
+        crate::user::process::current_user_pid(),
+        signal,
+        old,
+        disposition
     );
-    Ok(0)
+    Ok(old)
+}
+
+fn current_pending_signals() -> Result<u64, SyscallError> {
+    crate::user::process::current_pending_signals().ok_or(SyscallError::InvalidArgument)
+}
+
+fn current_process_group() -> Result<u64, SyscallError> {
+    crate::user::process::current_process_group_id()
+        .map(u64::from)
+        .ok_or(SyscallError::InvalidArgument)
+}
+
+fn set_process_group(pid: u64, process_group_id: u64) -> Result<u64, SyscallError> {
+    let caller_pid =
+        crate::user::process::current_user_pid().ok_or(SyscallError::InvalidArgument)?;
+    let target_pid = if pid == 0 {
+        caller_pid
+    } else {
+        u32::try_from(pid).map_err(|_| SyscallError::InvalidArgument)?
+    };
+    let process_group_id =
+        u32::try_from(process_group_id).map_err(|_| SyscallError::InvalidArgument)?;
+    crate::user::process::set_process_group(caller_pid, target_pid, process_group_id)
+        .map(u64::from)
+        .map_err(map_process_group_error)
+}
+
+fn get_session_id(pid: u64) -> Result<u64, SyscallError> {
+    let pid = if pid == 0 {
+        crate::user::process::current_user_pid().ok_or(SyscallError::InvalidArgument)?
+    } else {
+        u32::try_from(pid).map_err(|_| SyscallError::InvalidArgument)?
+    };
+    crate::user::process::session_id(pid)
+        .map(u64::from)
+        .ok_or(SyscallError::NoSuchProcess)
+}
+
+fn create_session() -> Result<u64, SyscallError> {
+    crate::user::process::create_current_session()
+        .map(u64::from)
+        .map_err(map_process_group_error)
+}
+
+fn map_process_group_error(error: crate::user::process::ProcessGroupError) -> SyscallError {
+    match error {
+        crate::user::process::ProcessGroupError::Missing => SyscallError::NoSuchProcess,
+        crate::user::process::ProcessGroupError::NotChild
+        | crate::user::process::ProcessGroupError::DifferentSession => {
+            SyscallError::PermissionDenied
+        }
+        crate::user::process::ProcessGroupError::SessionLeader
+        | crate::user::process::ProcessGroupError::GroupMissing
+        | crate::user::process::ProcessGroupError::GroupLeader => SyscallError::InvalidArgument,
+    }
 }
 
 fn close_fd_for_pid(pid: crate::user::process::Pid, fd: u64) -> Result<(), SyscallError> {
@@ -1227,7 +2049,7 @@ fn close_fd_for_pid(pid: crate::user::process::Pid, fd: u64) -> Result<(), Sysca
         .find(|entry| matches!(entry, Some(file) if file.pid == pid && file.fd == fd))
         .ok_or(SyscallError::InvalidArgument)?;
     if let Some(file) = entry.take() {
-        crate::serial_println!("[FD] pid={} close fd={} path={}", pid, fd, file.path);
+        close_descriptor(pid, file);
     }
     Ok(())
 }
@@ -1237,12 +2059,54 @@ pub fn close_process_files(pid: crate::user::process::Pid) {
     for entry in files.iter_mut() {
         if matches!(entry, Some(file) if file.pid == pid) {
             if let Some(file) = entry.take() {
+                close_descriptor(pid, file);
+            }
+        }
+    }
+    drop(files);
+    let mut events = EVENTS.lock();
+    for slot in events.iter_mut() {
+        if slot.as_ref().is_some_and(|event| event.owner_pid == pid) {
+            *slot = None;
+        }
+    }
+    drop(events);
+    let mut queues = MESSAGE_QUEUES.lock();
+    for slot in queues.iter_mut() {
+        if slot.as_ref().is_some_and(|queue| queue.owner_pid == pid) {
+            *slot = None;
+        }
+    }
+}
+
+fn close_descriptor(pid: crate::user::process::Pid, file: OpenFile) {
+    match file.descriptor {
+        Descriptor::File { path, .. } => {
+            crate::serial_println!("[FD] pid={} close fd={} path={}", pid, file.fd, path);
+        }
+        Descriptor::PipeRead { pipe_id } | Descriptor::PipeWrite { pipe_id } => {
+            let mut pipes = PIPES.lock();
+            if let Some(slot) = pipes.iter_mut().find(|pipe| {
+                pipe.as_ref()
+                    .is_some_and(|pipe| pipe.id == pipe_id && pipe.owner_pid == pid)
+            }) {
+                let pipe = slot.as_mut().expect("matched pipe slot must be populated");
+                match file.descriptor {
+                    Descriptor::PipeRead { .. } => pipe.readers = pipe.readers.saturating_sub(1),
+                    Descriptor::PipeWrite { .. } => pipe.writers = pipe.writers.saturating_sub(1),
+                    Descriptor::File { .. } => unreachable!(),
+                }
                 crate::serial_println!(
-                    "[FD] pid={} auto-close fd={} path={}",
+                    "[PIPE] pid={} close id={} fd={} readers={} writers={}",
                     pid,
+                    pipe_id,
                     file.fd,
-                    file.path
+                    pipe.readers,
+                    pipe.writers
                 );
+                if pipe.readers == 0 && pipe.writers == 0 {
+                    *slot = None;
+                }
             }
         }
     }
@@ -1258,6 +2122,28 @@ fn next_fd_for_pid(
             .iter()
             .flatten()
             .any(|file| file.pid == pid && file.fd == fd);
+        if !taken {
+            return Some(fd);
+        }
+        fd += 1;
+        if fd >= FIRST_USER_FD + MAX_OPEN_FILES as u64 {
+            return None;
+        }
+    }
+}
+
+fn next_fd_for_pid_excluding(
+    files: &[Option<OpenFile>; MAX_OPEN_FILES],
+    pid: crate::user::process::Pid,
+    excluded: u64,
+) -> Option<u64> {
+    let mut fd = FIRST_USER_FD;
+    loop {
+        let taken = fd == excluded
+            || files
+                .iter()
+                .flatten()
+                .any(|file| file.pid == pid && file.fd == fd);
         if !taken {
             return Some(fd);
         }
@@ -1321,6 +2207,7 @@ fn user_write_range(ptr: u64, len: u64) -> Result<&'static mut [u8], SyscallErro
     Ok(UserRange::checked(ptr, len, UserAccess::Write)?.as_write_slice())
 }
 
+#[cfg(test)]
 fn range_inside_layout(ptr: u64, end: u64, layout: crate::user::ring3::UserMemoryLayout) -> bool {
     if end <= ptr {
         return false;
@@ -1355,9 +2242,9 @@ fn format_u64_decimal(mut value: u64, out: &mut [u8; 20]) -> usize {
 #[cfg(test)]
 mod tests {
     use super::{
-        ABI_VERSION, FIRST_USER_FD, OpenFile, OpenFileData, STDIN, SYS_ABI_INFO, SYS_GETGID,
-        SYS_GETUID, SYS_LISTDIR, SYS_READ, SYS_UPTIME, SYS_WHOAMI, SYS_WRITE, SyscallError,
-        SyscallFrame, dispatch, next_fd_for_pid,
+        ABI_VERSION, Event, FIRST_USER_FD, MessageQueue, OpenFile, OpenFileData, Pipe, STDIN,
+        SYS_ABI_INFO, SYS_GETGID, SYS_GETUID, SYS_LISTDIR, SYS_READ, SYS_UPTIME, SYS_WHOAMI,
+        SYS_WRITE, SyscallError, SyscallFrame, dispatch, next_fd_for_pid,
     };
 
     fn frame(number: u64) -> SyscallFrame {
@@ -1426,9 +2313,11 @@ mod tests {
         files[0] = Some(OpenFile {
             pid: 2,
             fd: FIRST_USER_FD,
-            path: "/README",
-            data: OpenFileData::Static(b""),
-            offset: 0,
+            descriptor: super::Descriptor::File {
+                path: "/README",
+                data: OpenFileData::Static(b""),
+                offset: 0,
+            },
         });
 
         assert_eq!(next_fd_for_pid(&files, 2), Some(FIRST_USER_FD + 1));
@@ -1451,6 +2340,75 @@ mod tests {
 
         let len = super::format_u64_decimal(123456789, &mut buffer);
         assert_eq!(&buffer[..len], b"123456789");
+    }
+
+    #[test_case]
+    fn pipe_preserves_fifo_and_reports_nonblocking_states() {
+        let mut pipe = Pipe::new(1, 2);
+        let mut out = [0u8; 8];
+
+        assert_eq!(pipe.read(&mut out), Err(SyscallError::WouldBlock));
+        assert_eq!(pipe.write(b"abc"), Ok(3));
+        assert_eq!(pipe.read(&mut out), Ok(3));
+        assert_eq!(&out[..3], b"abc");
+
+        pipe.writers = 0;
+        assert_eq!(pipe.read(&mut out), Ok(0));
+    }
+
+    #[test_case]
+    fn pipe_wraps_around_fixed_ring_buffer() {
+        let mut pipe = Pipe::new(1, 2);
+        let first = [0x41u8; super::PIPE_CAPACITY - 2];
+        let mut drain = [0u8; super::PIPE_CAPACITY - 4];
+        let mut out = [0u8; 6];
+
+        assert_eq!(pipe.write(&first), Ok(first.len()));
+        assert_eq!(pipe.read(&mut drain), Ok(drain.len()));
+        assert_eq!(pipe.write(b"BCDE"), Ok(4));
+        assert_eq!(pipe.read(&mut out), Ok(6));
+        assert_eq!(&out, b"AABCDE");
+    }
+
+    #[test_case]
+    fn event_wait_queue_is_fifo_and_rejects_duplicates() {
+        let mut event = Event::new(1, 2);
+
+        assert!(event.enqueue(10));
+        assert!(event.enqueue(11));
+        assert!(!event.enqueue(10));
+        assert_eq!(event.dequeue(), Some(10));
+        assert_eq!(event.dequeue(), Some(11));
+        assert_eq!(event.dequeue(), None);
+    }
+
+    #[test_case]
+    fn message_queue_preserves_boundaries_and_fifo_order() {
+        let mut queue = MessageQueue::new(1, 2);
+        let mut small = [0u8; 2];
+        let mut out = [0u8; 8];
+
+        assert_eq!(queue.receive(&mut out), Err(SyscallError::WouldBlock));
+        assert_eq!(queue.send(b"alpha"), Ok(5));
+        assert_eq!(queue.send(b"beta"), Ok(4));
+        assert_eq!(
+            queue.receive(&mut small),
+            Err(SyscallError::InvalidArgument)
+        );
+        assert_eq!(queue.receive(&mut out), Ok(5));
+        assert_eq!(&out[..5], b"alpha");
+        assert_eq!(queue.receive(&mut out), Ok(4));
+        assert_eq!(&out[..4], b"beta");
+    }
+
+    #[test_case]
+    fn message_queue_reports_full_without_overwriting() {
+        let mut queue = MessageQueue::new(1, 2);
+
+        for value in 0..super::MESSAGE_QUEUE_DEPTH {
+            assert_eq!(queue.send(&[value as u8]), Ok(1));
+        }
+        assert_eq!(queue.send(b"x"), Err(SyscallError::WouldBlock));
     }
 
     #[test_case]

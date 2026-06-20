@@ -2,12 +2,33 @@ use super::task::Context;
 
 unsafe extern "C" {
     pub fn setup_first_task(context: *const Context) -> !;
+    pub fn start_kernel_interrupt_frame(frame_rsp: u64) -> !;
 }
 
 #[cfg(target_arch = "x86_64")]
 core::arch::global_asm!(
     r#"
 .global setup_first_task
+.global start_kernel_interrupt_frame
+
+start_kernel_interrupt_frame:
+    mov rsp, rdi
+    pop rax
+    pop rbx
+    pop rcx
+    pop rdx
+    pop rsi
+    pop rdi
+    pop rbp
+    pop r8
+    pop r9
+    pop r10
+    pop r11
+    pop r12
+    pop r13
+    pop r14
+    pop r15
+    iretq
 
 # void setup_first_task(const Context *context)
 # rdi = context pointer

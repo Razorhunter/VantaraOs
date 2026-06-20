@@ -16,9 +16,28 @@ ORG USER_BASE
 %define SYS_ABI_INFO   28
 %define SYS_THREAD_CREATE 29
 %define SYS_THREAD_EXIT   30
+%define SYS_THREAD_JOIN   31
+%define SYS_THREAD_SPAWN  32
+%define SYS_PIPE          33
+%define SYS_EVENT_CREATE  34
+%define SYS_EVENT_WAIT    35
+%define SYS_EVENT_SIGNAL  36
+%define SYS_EVENT_CLOSE   37
+%define SYS_MSGQ_CREATE   38
+%define SYS_MSGQ_SEND     39
+%define SYS_MSGQ_RECV     40
+%define SYS_MSGQ_CLOSE    41
+%define SYS_SIGPROCMASK   42
+%define SYS_SIGPENDING    43
+%define SYS_SIGACTION     44
+%define SYS_SIGRETURN     45
+%define SYS_GETPGRP       46
+%define SYS_SETPGID       47
+%define SYS_GETSID        48
+%define SYS_SETSID        49
 
 %define ABI_VERSION_MAJOR 1
-%define ABI_VERSION_MINOR 1
+%define ABI_VERSION_MINOR 10
 
 %define ERR_UNKNOWN_SYSCALL -1
 %define ERR_INVALID_ARGUMENT -2
@@ -26,6 +45,12 @@ ORG USER_BASE
 %define ERR_NO_SUCH_PROCESS  -4
 %define ERR_NOT_CHILD        -5
 %define ERR_WOULD_BLOCK      -6
+%define ERR_PERMISSION_DENIED -7
+
+%define SIGINT  2
+%define SIGTERM 15
+%define SIGCONT 18
+%define SIGTSTP 20
 
 %define STDIN  0
 %define STDOUT 1

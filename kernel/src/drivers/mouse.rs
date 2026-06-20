@@ -1,4 +1,4 @@
-use spin::Mutex;
+use crate::sync::PreemptMutex as Mutex;
 use x86_64::instructions::port::Port;
 
 use crate::input::{INPUT_QUEUE, MouseButton};

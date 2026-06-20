@@ -5,7 +5,6 @@ use crate::drivers::mouse::{MOUSE, MouseDriver};
 use crate::{gdt, println};
 use lazy_static::lazy_static;
 use pic8259::ChainedPics;
-use spin;
 use x86_64::PrivilegeLevel;
 use x86_64::VirtAddr;
 use x86_64::instructions::interrupts;
@@ -15,8 +14,8 @@ use x86_64::structures::idt::{InterruptDescriptorTable, InterruptStackFrame, Pag
 pub const PIC_1_OFFSET: u8 = 32;
 pub const PIC_2_OFFSET: u8 = PIC_1_OFFSET + 8;
 
-pub static PICS: spin::Mutex<ChainedPics> =
-    spin::Mutex::new(unsafe { ChainedPics::new(PIC_1_OFFSET, PIC_2_OFFSET) });
+pub static PICS: crate::sync::PreemptMutex<ChainedPics> =
+    crate::sync::PreemptMutex::new(unsafe { ChainedPics::new(PIC_1_OFFSET, PIC_2_OFFSET) });
 
 unsafe extern "C" {
     fn syscall_interrupt_entry();
@@ -54,8 +53,56 @@ timer_interrupt_entry:
     sub rsp, 16
     mov [rsp], rax
     call timer_interrupt_dispatch
+    test rax, rax
+    jnz 1f
     mov rsp, [rsp]
-
+    jmp 2f
+1:
+    # Bit zero marks a never-run task. Fresh tasks need an ordinary entry jump;
+    # resumed tasks carry a real CPU interrupt frame and return through iretq.
+    test rax, 1
+    jz 3f
+    and rax, -2
+    mov rsp, rax
+    pop rax
+    pop rbx
+    pop rcx
+    pop rdx
+    pop rsi
+    pop rdi
+    pop rbp
+    pop r8
+    pop r9
+    pop r10
+    pop r11
+    pop r12
+    pop r13
+    pop r14
+    pop r15
+    push qword ptr [rsp + 16]
+    popfq
+    mov rax, [rsp]
+    add rsp, 24
+    jmp rax
+3:
+    mov rsp, rax
+    pop rax
+    pop rbx
+    pop rcx
+    pop rdx
+    pop rsi
+    pop rdi
+    pop rbp
+    pop r8
+    pop r9
+    pop r10
+    pop r11
+    pop r12
+    pop r13
+    pop r14
+    pop r15
+    iretq
+2:
     pop rax
     pop rbx
     pop rcx
@@ -365,7 +412,7 @@ impl TimerInterruptFrame {
 }
 
 #[unsafe(no_mangle)]
-pub extern "C" fn timer_interrupt_dispatch(frame: &mut TimerInterruptFrame) {
+pub extern "C" fn timer_interrupt_dispatch(frame: &mut TimerInterruptFrame) -> u64 {
     crate::timer::tick();
     crate::user::process::record_timer_preemption_check();
 
@@ -391,9 +438,15 @@ pub extern "C" fn timer_interrupt_dispatch(frame: &mut TimerInterruptFrame) {
             }
             frame.apply_user_resume(resume.resume_context);
         }
+    } else if let Some(next_frame) =
+        crate::scheduler::SCHEDULER.preempt_from_timer(frame as *mut TimerInterruptFrame as u64)
+    {
+        notify_end_of_interrupt(InterruptIndex::Timer);
+        return next_frame;
     }
 
     notify_end_of_interrupt(InterruptIndex::Timer);
+    0
 }
 
 extern "x86-interrupt" fn keyboard_interrupt_handler(_stack_frame: InterruptStackFrame) {
