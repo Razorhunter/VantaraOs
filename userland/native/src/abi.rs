@@ -50,9 +50,14 @@ pub const SYS_GETPGRP: u64 = 46;
 pub const SYS_SETPGID: u64 = 47;
 pub const SYS_GETSID: u64 = 48;
 pub const SYS_SETSID: u64 = 49;
+pub const SYS_CREATE: u64 = 50;
+pub const SYS_UNLINK: u64 = 51;
+pub const SYS_RENAME: u64 = 52;
+pub const SYS_MKDIR: u64 = 53;
+pub const SYS_RMDIR: u64 = 54;
 
 pub const ABI_VERSION_MAJOR: u64 = 1;
-pub const ABI_VERSION_MINOR: u64 = 10;
+pub const ABI_VERSION_MINOR: u64 = 12;
 pub const ABI_VERSION: u64 = (ABI_VERSION_MAJOR << 32) | ABI_VERSION_MINOR;
 
 pub const ERR_UNKNOWN_SYSCALL: i64 = -1;
@@ -101,6 +106,11 @@ const _: () = {
     assert!(SYS_SETPGID == 47);
     assert!(SYS_GETSID == 48);
     assert!(SYS_SETSID == 49);
+    assert!(SYS_CREATE == 50);
+    assert!(SYS_UNLINK == 51);
+    assert!(SYS_RENAME == 52);
+    assert!(SYS_MKDIR == 53);
+    assert!(SYS_RMDIR == 54);
     assert!(ERR_UNKNOWN_SYSCALL == -1);
     assert!(ERR_WOULD_BLOCK == -6);
     assert!(ERR_PERMISSION_DENIED == -7);
@@ -221,6 +231,34 @@ pub fn read(fd: u64, out: &mut [u8]) -> i64 {
 
 pub fn close(fd: u64) -> i64 {
     unsafe { syscall1(SYS_CLOSE, fd) as i64 }
+}
+
+pub fn create(path: &[u8]) -> i64 {
+    unsafe { syscall2(SYS_CREATE, path.as_ptr() as u64, path.len() as u64) as i64 }
+}
+
+pub fn unlink(path: &[u8]) -> i64 {
+    unsafe { syscall2(SYS_UNLINK, path.as_ptr() as u64, path.len() as u64) as i64 }
+}
+
+pub fn rename(old_path: &[u8], new_path: &[u8]) -> i64 {
+    unsafe {
+        syscall4(
+            SYS_RENAME,
+            old_path.as_ptr() as u64,
+            old_path.len() as u64,
+            new_path.as_ptr() as u64,
+            new_path.len() as u64,
+        ) as i64
+    }
+}
+
+pub fn mkdir(path: &[u8]) -> i64 {
+    unsafe { syscall2(SYS_MKDIR, path.as_ptr() as u64, path.len() as u64) as i64 }
+}
+
+pub fn rmdir(path: &[u8]) -> i64 {
+    unsafe { syscall2(SYS_RMDIR, path.as_ptr() as u64, path.len() as u64) as i64 }
 }
 
 pub fn pipe(fds: &mut [u64; 2]) -> i64 {

@@ -268,7 +268,7 @@ fn run_command(line: &[u8]) -> bool {
 
     if eq(cmd, b"help") {
         write(
-            "help bg cd pwd ls cat stat procs pci netdev dmesg drvstat kill sleep uptime whoami rusthello yielddemo preemptdemo threaddemo pipedemo eventdemo msgdemo signaldemo jobdemo reboot exit\n",
+            "help bg cd pwd ls cat stat touch write rm mv mkdir rmdir procs pci netdev dmesg drvstat kill sleep uptime whoami rusthello yielddemo preemptdemo threaddemo pipedemo eventdemo msgdemo signaldemo jobdemo reboot exit\n",
         );
         return true;
     }
@@ -337,6 +337,12 @@ fn exec_command_with_mode(cmd: &[u8], arg: Option<&[u8]>, background: bool) -> i
         || eq(cmd, b"fault")
         || eq(cmd, b"sleep")
         || eq(cmd, b"pwd")
+        || eq(cmd, b"touch")
+        || eq(cmd, b"write")
+        || eq(cmd, b"rm")
+        || eq(cmd, b"mv")
+        || eq(cmd, b"mkdir")
+        || eq(cmd, b"rmdir")
     {
         exec_with_mode(cmd, arg, background)
     } else if eq(cmd, b"uptime")

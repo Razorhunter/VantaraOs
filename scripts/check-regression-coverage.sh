@@ -33,10 +33,17 @@ require_tests "filesystem" "kernel/src/fs.rs" 4
 
 require_file "scripts/qemu-smoke.sh"
 require_file "scripts/qemu-boot-integration.sh"
+require_file "scripts/qemu-service-manager.sh"
+require_file "scripts/qemu-device-namespace.sh"
 require_file "scripts/qemu-command-smoke.sh"
+require_file "scripts/qemu-filesystem-write.sh"
+require_file "scripts/qemu-filesystem-persistence.sh"
 require_file "scripts/qemu-preemption.sh"
 require_file "scripts/qemu-signal-job-control.sh"
 require_file "scripts/qemu-terminal-signals.sh"
 require_file "scripts/qemu-fault-isolation.sh"
+require_file "scripts/build-initrd.sh"
+require_file "scripts/build-dev-package.sh"
+require_file "scripts/verify-dev-package.sh"
 
 echo "regression coverage contract passed"

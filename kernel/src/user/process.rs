@@ -1968,10 +1968,6 @@ impl ProcessTable {
             return false;
         };
 
-        if parent_pid == 1 {
-            return true;
-        }
-
         self.processes
             .get(&parent_pid)
             .map(|parent| {
@@ -2186,7 +2182,8 @@ fn take_current_user() -> Option<(Pid, Tid)> {
 pub fn init_process_table() {
     let mut table = PROCESS_TABLE.lock();
     if table.stats().process_count == 0 {
-        let pid = table.create_process(
+        let pid = table.create_reserved_process(
+            0,
             None,
             "kernel",
             "kernel",
@@ -2194,7 +2191,7 @@ pub fn init_process_table() {
             AddressSpace::kernel_placeholder(0),
         );
         table.mark_ready(pid);
-        crate::serial_println!("[PROCESS] Created placeholder init process pid={}", pid);
+        crate::serial_println!("[PROCESS] Created kernel process pid={}", pid);
     }
 }
 
@@ -4700,23 +4697,33 @@ mod tests {
     }
 
     #[test_case]
-    fn init_reaper_collects_kernel_parented_user_zombies() {
+    fn init_reaper_leaves_children_for_live_pid_one() {
         let mut table = ProcessTable::new();
+        let init_layout = crate::user::ring3::memory_layout_for_pid(1);
+        let init = table.create_process(
+            None,
+            "init",
+            "/bin/init",
+            crate::user::program::UserProgramArg::empty(),
+            AddressSpace::kernel_shared_user(0x400000, init_layout),
+        );
+        assert_eq!(init, 1);
+
         let layout = crate::user::ring3::memory_layout_for_pid(2);
         let child = table.create_process(
-            Some(1),
-            "sh",
-            "/bin/sh",
+            Some(init),
+            "login",
+            "/bin/login",
             crate::user::program::UserProgramArg::empty(),
             AddressSpace::kernel_shared_user(0x400000, layout),
         );
 
         table.mark_exited(child, 0);
 
-        assert_eq!(table.reap_orphan_zombies(), 1);
+        assert_eq!(table.reap_orphan_zombies(), 0);
         assert_eq!(
             table.processes.get(&child).unwrap().state,
-            ProcessState::Reaped
+            ProcessState::Zombie
         );
     }
 

@@ -51,7 +51,7 @@ impl Scheduler {
     pub fn create_task(&self, entry_point: extern "C" fn() -> !) -> u32 {
         let task_id = crate::user::process::create_kernel_thread()
             .expect("kernel process must exist before creating scheduler tasks");
-        let task = TaskControlBlock::new(task_id, 1, entry_point, DEFAULT_STACK_SIZE);
+        let task = TaskControlBlock::new(task_id, 0, entry_point, DEFAULT_STACK_SIZE);
         let mut tasks = self.tasks.lock();
         tasks.insert(task_id, task);
 
@@ -71,7 +71,7 @@ impl Scheduler {
         let mut tasks = self.tasks.lock();
         tasks.insert(
             idle_tid,
-            TaskControlBlock::new(idle_tid, 1, idle_task_entry, DEFAULT_STACK_SIZE),
+            TaskControlBlock::new(idle_tid, 0, idle_task_entry, DEFAULT_STACK_SIZE),
         );
         *self.idle_task_id.lock() = Some(idle_tid);
         serial_println!("[SCHEDULER] Created idle task");

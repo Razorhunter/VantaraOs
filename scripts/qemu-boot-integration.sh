@@ -66,6 +66,8 @@ wait_for_log() {
 }
 
 wait_for_log "Vantara init started"
+wait_for_log "[USER] boot policy queued /bin/init pid=1"
+wait_for_log "[init] service manager running as pid 1"
 wait_for_log "login: "
 
 printf 'sendkey r\n' >&3

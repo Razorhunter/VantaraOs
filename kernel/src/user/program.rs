@@ -79,6 +79,28 @@ pub fn request_path(path: &str) -> Result<crate::user::process::Pid, ProgramErro
     request_path_with_arg(path, None)
 }
 
+pub fn request_boot_init() -> Result<crate::user::process::Pid, ProgramError> {
+    let image = crate::user::images::normalize_path("init")
+        .and_then(crate::user::images::find)
+        .ok_or(ProgramError::NotFound)?;
+    let pid = crate::user::process::reserve_pid();
+    if pid != 1 {
+        crate::serial_println!(
+            "[USER] warning: boot init reserved pid={}, expected pid=1",
+            pid
+        );
+    }
+
+    queue_program(
+        image,
+        pid,
+        None,
+        UserProgramArg::from_path(default_arg_for(image.name))?,
+        JobMode::Foreground,
+    );
+    Ok(pid)
+}
+
 pub fn request_path_with_arg(
     path: &str,
     arg: Option<&str>,
@@ -105,6 +127,17 @@ pub fn request_path_with_arg_and_mode(
     let pid = crate::user::process::reserve_pid();
     let parent_pid = crate::user::process::current_user_pid().or(Some(1));
 
+    queue_program(image, pid, parent_pid, arg, job_mode);
+    Ok(pid)
+}
+
+fn queue_program(
+    image: crate::user::images::UserlandImage,
+    pid: crate::user::process::Pid,
+    parent_pid: Option<crate::user::process::Pid>,
+    arg: UserProgramArg,
+    job_mode: JobMode,
+) {
     let program = UserProgram {
         pid,
         parent_pid,
@@ -126,7 +159,6 @@ pub fn request_path_with_arg_and_mode(
         job_mode,
         pending_count
     );
-    Ok(pid)
 }
 
 pub fn request_demo() {

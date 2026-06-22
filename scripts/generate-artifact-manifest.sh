@@ -45,9 +45,13 @@ mkdir -p "${ROOT_DIR}/target"
   write_entry "metadata" "${BUILD_METADATA}"
   write_entry "registry" "${REGISTRY}"
 
-  while IFS= read -r artifact; do
+  while IFS= read -r file_name; do
+    artifact="${USERLAND_DIR}/${file_name}"
+    require_artifact "${artifact}"
     write_entry "userland" "${artifact}"
-  done < <(find "${USERLAND_DIR}" -maxdepth 1 -type f \( -name '*.bin' -o -name '*.elf' \) | LC_ALL=C sort)
+  done < <(
+    sed -nE 's@.*target/userland/([^"]+)".*@\1@p' "${REGISTRY}" | LC_ALL=C sort -u
+  )
 } >"${TEMP_MANIFEST}"
 
 mv "${TEMP_MANIFEST}" "${MANIFEST}"

@@ -82,16 +82,28 @@ wait_for_log 'root:/$ '
 
 int_start="$(wc -c <"${LOG_FILE}")"
 send_text "sleep 10000"
-wait_for_log "[USER] sleep pid=5" "${int_start}"
+wait_for_log "[USER] sleep pid=" "${int_start}"
+int_pid="$(
+  tail -c "+$((int_start + 1))" "${LOG_FILE}" \
+    | grep -oE '\[USER\] sleep pid=[0-9]+' \
+    | tail -n1 \
+    | sed -E 's/.*pid=([0-9]+)/\1/'
+)"
 printf 'sendkey ctrl-c\n' >&3
-wait_for_log "[TTY] signal=2 pid=5 name=sleep status=130 stopped=false parent_woken=true" "${int_start}"
+wait_for_log "[TTY] signal=2 pid=${int_pid} name=sleep status=130 stopped=false parent_woken=true" "${int_start}"
 wait_for_log 'root:/$ ' "${int_start}"
 
 stop_start="$(wc -c <"${LOG_FILE}")"
 send_text "sleep 10000"
-wait_for_log "[USER] sleep pid=6" "${stop_start}"
+wait_for_log "[USER] sleep pid=" "${stop_start}"
+stop_pid="$(
+  tail -c "+$((stop_start + 1))" "${LOG_FILE}" \
+    | grep -oE '\[USER\] sleep pid=[0-9]+' \
+    | tail -n1 \
+    | sed -E 's/.*pid=([0-9]+)/\1/'
+)"
 printf 'sendkey ctrl-z\n' >&3
-wait_for_log "[TTY] signal=20 pid=6 name=sleep status=148 stopped=true parent_woken=true" "${stop_start}"
+wait_for_log "[TTY] signal=20 pid=${stop_pid} name=sleep status=148 stopped=true parent_woken=true" "${stop_start}"
 wait_for_log 'root:/$ ' "${stop_start}"
 
 procs_start="$(wc -c <"${LOG_FILE}")"
@@ -100,8 +112,8 @@ wait_for_log "Stopped" "${procs_start}"
 wait_for_log 'root:/$ ' "${procs_start}"
 
 cont_start="$(wc -c <"${LOG_FILE}")"
-send_text "kill 6 18"
-wait_for_log "[SIGNAL] continued pid=6 signal=18" "${cont_start}"
+send_text "kill ${stop_pid} 18"
+wait_for_log "[SIGNAL] continued pid=${stop_pid} signal=18" "${cont_start}"
 wait_for_log "kill: signal delivered" "${cont_start}"
 wait_for_log 'root:/$ ' "${cont_start}"
 

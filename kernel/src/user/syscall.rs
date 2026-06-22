@@ -57,9 +57,14 @@ pub const SYS_GETPGRP: u64 = 46;
 pub const SYS_SETPGID: u64 = 47;
 pub const SYS_GETSID: u64 = 48;
 pub const SYS_SETSID: u64 = 49;
+pub const SYS_CREATE: u64 = 50;
+pub const SYS_UNLINK: u64 = 51;
+pub const SYS_RENAME: u64 = 52;
+pub const SYS_MKDIR: u64 = 53;
+pub const SYS_RMDIR: u64 = 54;
 
 pub const ABI_VERSION_MAJOR: u64 = 1;
-pub const ABI_VERSION_MINOR: u64 = 10;
+pub const ABI_VERSION_MINOR: u64 = 12;
 pub const ABI_VERSION: u64 = (ABI_VERSION_MAJOR << 32) | ABI_VERSION_MINOR;
 
 pub const SYSCALL_RETURN_TO_KERNEL: u64 = u64::MAX;
@@ -69,7 +74,7 @@ const MAX_READ_LEN: u64 = 1024;
 const MIN_USER_THREAD_STACK_SIZE: u64 = 1024;
 const MAX_USER_THREAD_STACK_SIZE: u64 = 64 * 1024;
 const MAX_OPEN_FILES: usize = 16;
-const OPEN_FILE_BUFFER_SIZE: usize = 256;
+const DIRECTORY_READ_BUFFER_SIZE: usize = 2048;
 const MAX_PIPES: usize = 8;
 const PIPE_CAPACITY: usize = 256;
 const MAX_EVENTS: usize = 16;
@@ -93,8 +98,11 @@ struct OpenFile {
 #[derive(Debug, Clone, Copy)]
 enum Descriptor {
     File {
-        path: &'static str,
-        data: OpenFileData,
+        target: crate::fs::OpenTarget,
+        offset: usize,
+    },
+    Directory {
+        path: crate::fs::NormalizedPath,
         offset: usize,
     },
     PipeRead {
@@ -103,36 +111,6 @@ enum Descriptor {
     PipeWrite {
         pipe_id: u64,
     },
-}
-
-#[derive(Debug, Clone, Copy)]
-enum OpenFileData {
-    Static(&'static [u8]),
-    Buffered {
-        bytes: [u8; OPEN_FILE_BUFFER_SIZE],
-        len: usize,
-    },
-}
-
-impl OpenFileData {
-    fn len(&self) -> usize {
-        match self {
-            Self::Static(data) => data.len(),
-            Self::Buffered { len, .. } => *len,
-        }
-    }
-
-    fn copy_to_user(&self, offset: usize, out_ptr: u64, count: usize) {
-        let source = match self {
-            Self::Static(data) => &data[offset..offset + count],
-            Self::Buffered { bytes, .. } => &bytes[offset..offset + count],
-        };
-        // SAFETY: syscall validation proved the complete destination range is
-        // mapped user-writable; the source slice bounds are checked above.
-        unsafe {
-            core::ptr::copy_nonoverlapping(source.as_ptr(), out_ptr as *mut u8, count);
-        }
-    }
 }
 
 static OPEN_FILES: Mutex<[Option<OpenFile>; MAX_OPEN_FILES]> = Mutex::new([None; MAX_OPEN_FILES]);
@@ -519,6 +497,11 @@ const _: () = {
     assert!(SYS_SETPGID == 47);
     assert!(SYS_GETSID == 48);
     assert!(SYS_SETSID == 49);
+    assert!(SYS_CREATE == 50);
+    assert!(SYS_UNLINK == 51);
+    assert!(SYS_RENAME == 52);
+    assert!(SYS_MKDIR == 53);
+    assert!(SYS_RMDIR == 54);
     assert!(SyscallError::UnknownSyscall as i64 == -1);
     assert!(SyscallError::WouldBlock as i64 == -6);
 };
@@ -906,6 +889,11 @@ pub fn dispatch(frame: SyscallFrame) -> Result<u64, SyscallError> {
         SYS_SETPGID => set_process_group(frame.arg0, frame.arg1),
         SYS_GETSID => get_session_id(frame.arg0),
         SYS_SETSID => create_session(),
+        SYS_CREATE => create_file(frame.arg0, frame.arg1),
+        SYS_UNLINK => unlink_file(frame.arg0, frame.arg1),
+        SYS_RENAME => rename_file(frame.arg0, frame.arg1, frame.arg2, frame.arg3),
+        SYS_MKDIR => mkdir_user(frame.arg0, frame.arg1),
+        SYS_RMDIR => rmdir_user(frame.arg0, frame.arg1),
         SYS_SLEEP_MS => Err(SyscallError::NotImplemented),
         SYS_YIELD => Err(SyscallError::NotImplemented),
         SYS_EXIT => Err(SyscallError::NotImplemented),
@@ -1066,7 +1054,7 @@ fn write_user_buffer(fd: u64, ptr: u64, len: u64) -> Result<u64, SyscallError> {
 
     let bytes = read_user_bytes(ptr, len)?;
     if fd != 1 && fd != 2 {
-        return write_pipe(fd, bytes).map(|written| written as u64);
+        return write_descriptor(fd, bytes).map(|written| written as u64);
     }
 
     match str::from_utf8(bytes) {
@@ -1097,16 +1085,10 @@ fn list_dir_to_user(
 ) -> Result<u64, SyscallError> {
     let path = read_user_str(path_ptr, path_len)?;
     let cwd = current_cwd();
-    let entries =
-        crate::fs::list_from(cwd.as_str(), path).map_err(|_| SyscallError::InvalidArgument)?;
-
-    let mut written = 0u64;
-    for entry in entries {
-        written += copy_piece_to_user(out_ptr, out_len, written, entry.as_bytes())?;
-        written += copy_piece_to_user(out_ptr, out_len, written, b"\n")?;
-    }
-
-    Ok(written)
+    let out = user_write_range(out_ptr, out_len)?;
+    crate::fs::list_to_buffer(cwd.as_str(), path, out)
+        .map(|written| written as u64)
+        .map_err(|_| SyscallError::InvalidArgument)
 }
 
 fn read_file_to_user(
@@ -1117,9 +1099,10 @@ fn read_file_to_user(
 ) -> Result<u64, SyscallError> {
     let path = read_user_str(path_ptr, path_len)?;
     let cwd = current_cwd();
-    let data =
-        crate::fs::read_from(cwd.as_str(), path).map_err(|_| SyscallError::InvalidArgument)?;
-    copy_to_user_buffer(out_ptr, out_len, data)
+    let out = user_write_range(out_ptr, out_len)?;
+    crate::fs::read_to_buffer(cwd.as_str(), path, out)
+        .map(|written| written as u64)
+        .map_err(|_| SyscallError::InvalidArgument)
 }
 
 fn stat_to_user(
@@ -1139,7 +1122,7 @@ fn stat_to_user(
             crate::fs::FileType::File => 1,
             crate::fs::FileType::Directory => 2,
         },
-        inode: stat.inode,
+        inode: stat.inode(),
     };
     let bytes = unsafe {
         slice::from_raw_parts(
@@ -1196,8 +1179,10 @@ fn trim_ascii_spaces(bytes: &[u8]) -> &[u8] {
 
 fn open_file(path_ptr: u64, path_len: u64) -> Result<u64, SyscallError> {
     let path = read_user_str(path_ptr, path_len)?;
-    let open_path = normalize_open_path(path)?;
-    let data = open_data_for_path(open_path)?;
+    let cwd = current_cwd();
+    let target =
+        crate::fs::open_from(cwd.as_str(), path).map_err(|_| SyscallError::InvalidArgument)?;
+    let descriptor = descriptor_for_target(target)?;
     let pid = crate::user::process::current_user_pid().ok_or(SyscallError::InvalidArgument)?;
 
     let mut files = OPEN_FILES.lock();
@@ -1209,15 +1194,83 @@ fn open_file(path_ptr: u64, path_len: u64) -> Result<u64, SyscallError> {
     *slot = Some(OpenFile {
         pid,
         fd,
-        descriptor: Descriptor::File {
-            path: open_path,
-            data,
-            offset: 0,
-        },
+        descriptor,
     });
 
-    crate::serial_println!("[FD] pid={} open {} -> fd={}", pid, open_path, fd);
+    crate::serial_println!("[FD] pid={} open {} -> fd={}", pid, target.path, fd);
     Ok(fd)
+}
+
+fn create_file(path_ptr: u64, path_len: u64) -> Result<u64, SyscallError> {
+    let path = read_user_str(path_ptr, path_len)?;
+    let cwd = current_cwd();
+    let target =
+        crate::fs::create_from(cwd.as_str(), path).map_err(|_| SyscallError::InvalidArgument)?;
+    let pid = crate::user::process::current_user_pid().ok_or(SyscallError::InvalidArgument)?;
+    let mut files = OPEN_FILES.lock();
+    let fd = next_fd_for_pid(&files, pid).ok_or(SyscallError::InvalidArgument)?;
+    let slot = files
+        .iter_mut()
+        .find(|entry| entry.is_none())
+        .ok_or(SyscallError::InvalidArgument)?;
+    *slot = Some(OpenFile {
+        pid,
+        fd,
+        descriptor: Descriptor::File { target, offset: 0 },
+    });
+    crate::serial_println!("[FD] pid={} create {} -> fd={}", pid, target.path, fd);
+    Ok(fd)
+}
+
+fn unlink_file(path_ptr: u64, path_len: u64) -> Result<u64, SyscallError> {
+    let path = read_user_str(path_ptr, path_len)?;
+    let cwd = current_cwd();
+    let target =
+        crate::fs::open_from(cwd.as_str(), path).map_err(|_| SyscallError::InvalidArgument)?;
+    if target.readonly || target.file_type != crate::fs::FileType::File {
+        return Err(SyscallError::PermissionDenied);
+    }
+    if OPEN_FILES.lock().iter().flatten().any(|file| {
+        matches!(
+            file.descriptor,
+            Descriptor::File { target: open, .. } if open.node == target.node
+        )
+    }) {
+        return Err(SyscallError::WouldBlock);
+    }
+    crate::fs::unlink_from(cwd.as_str(), path)
+        .map(|_| 0)
+        .map_err(|_| SyscallError::InvalidArgument)
+}
+
+fn mkdir_user(path_ptr: u64, path_len: u64) -> Result<u64, SyscallError> {
+    let path = read_user_str(path_ptr, path_len)?;
+    let cwd = current_cwd();
+    crate::fs::mkdir_from(cwd.as_str(), path)
+        .map(|_| 0)
+        .map_err(|_| SyscallError::InvalidArgument)
+}
+
+fn rmdir_user(path_ptr: u64, path_len: u64) -> Result<u64, SyscallError> {
+    let path = read_user_str(path_ptr, path_len)?;
+    let cwd = current_cwd();
+    crate::fs::rmdir_from(cwd.as_str(), path)
+        .map(|_| 0)
+        .map_err(|_| SyscallError::InvalidArgument)
+}
+
+fn rename_file(
+    old_ptr: u64,
+    old_len: u64,
+    new_ptr: u64,
+    new_len: u64,
+) -> Result<u64, SyscallError> {
+    let old_path = read_user_str(old_ptr, old_len)?;
+    let new_path = read_user_str(new_ptr, new_len)?;
+    let cwd = current_cwd();
+    crate::fs::rename_from(cwd.as_str(), old_path, new_path)
+        .map(|_| 0)
+        .map_err(|_| SyscallError::InvalidArgument)
 }
 
 fn current_cwd() -> crate::fs::NormalizedPath {
@@ -1246,10 +1299,19 @@ fn read_fd_to_user(fd: u64, out_ptr: u64, out_len: u64) -> Result<u64, SyscallEr
         .ok_or(SyscallError::InvalidArgument)?;
 
     match descriptor {
-        Descriptor::File { data, offset, .. } => {
-            let remaining = data.len().saturating_sub(*offset);
+        Descriptor::File { target, offset } => {
+            let count = crate::fs::read_node(target.node, *offset, out)
+                .map_err(|_| SyscallError::InvalidArgument)?;
+            *offset += count;
+            Ok(count as u64)
+        }
+        Descriptor::Directory { path, offset } => {
+            let mut listing = [0u8; DIRECTORY_READ_BUFFER_SIZE];
+            let len = crate::fs::list_to_buffer("/", path.as_str(), &mut listing)
+                .map_err(|_| SyscallError::InvalidArgument)?;
+            let remaining = len.saturating_sub(*offset);
             let count = remaining.min(out_len as usize);
-            data.copy_to_user(*offset, out.as_ptr() as u64, count);
+            out[..count].copy_from_slice(&listing[*offset..*offset + count]);
             *offset += count;
             Ok(count as u64)
         }
@@ -1262,42 +1324,14 @@ fn read_fd_to_user(fd: u64, out_ptr: u64, out_len: u64) -> Result<u64, SyscallEr
     }
 }
 
-fn normalize_open_path(path: &str) -> Result<&'static str, SyscallError> {
-    let cwd = current_cwd();
-    crate::fs::stat_from(cwd.as_str(), path)
-        .map(|stat| stat.path)
-        .map_err(|_| SyscallError::InvalidArgument)
-}
-
-fn open_data_for_path(path: &'static str) -> Result<OpenFileData, SyscallError> {
-    if let Ok(data) = crate::fs::read(path) {
-        return Ok(OpenFileData::Static(data));
+fn descriptor_for_target(target: crate::fs::OpenTarget) -> Result<Descriptor, SyscallError> {
+    if target.file_type == crate::fs::FileType::File {
+        return Ok(Descriptor::File { target, offset: 0 });
     }
-
-    let entries = crate::fs::list(path).map_err(|_| SyscallError::InvalidArgument)?;
-    let mut bytes = [0u8; OPEN_FILE_BUFFER_SIZE];
-    let mut len = 0usize;
-    for entry in entries {
-        len = append_to_buffer(&mut bytes, len, entry.as_bytes())?;
-        len = append_to_buffer(&mut bytes, len, b"\n")?;
-    }
-
-    Ok(OpenFileData::Buffered { bytes, len })
-}
-
-fn append_to_buffer(
-    buffer: &mut [u8; OPEN_FILE_BUFFER_SIZE],
-    offset: usize,
-    data: &[u8],
-) -> Result<usize, SyscallError> {
-    let end = offset
-        .checked_add(data.len())
-        .ok_or(SyscallError::InvalidArgument)?;
-    if end > buffer.len() {
-        return Err(SyscallError::InvalidArgument);
-    }
-    buffer[offset..end].copy_from_slice(data);
-    Ok(end)
+    Ok(Descriptor::Directory {
+        path: target.path,
+        offset: 0,
+    })
 }
 
 fn create_pipe(out_ptr: u64, out_len: u64) -> Result<u64, SyscallError> {
@@ -1372,6 +1406,35 @@ fn write_pipe(fd: u64, source: &[u8]) -> Result<usize, SyscallError> {
         .find(|pipe| pipe.id == pipe_id && pipe.owner_pid == pid)
         .ok_or(SyscallError::InvalidArgument)?;
     pipe.write(source)
+}
+
+fn write_descriptor(fd: u64, source: &[u8]) -> Result<usize, SyscallError> {
+    let pid = crate::user::process::current_user_pid().ok_or(SyscallError::InvalidArgument)?;
+    let mut files = OPEN_FILES.lock();
+    let descriptor = files
+        .iter_mut()
+        .flatten()
+        .find(|file| file.pid == pid && file.fd == fd)
+        .map(|file| &mut file.descriptor)
+        .ok_or(SyscallError::InvalidArgument)?;
+    match descriptor {
+        Descriptor::File { target, offset } => {
+            if target.readonly {
+                return Err(SyscallError::PermissionDenied);
+            }
+            let written = crate::fs::write_node(target.node, *offset, source)
+                .map_err(|_| SyscallError::InvalidArgument)?;
+            *offset += written;
+            Ok(written)
+        }
+        Descriptor::PipeWrite { .. } => {
+            drop(files);
+            write_pipe(fd, source)
+        }
+        Descriptor::Directory { .. } | Descriptor::PipeRead { .. } => {
+            Err(SyscallError::InvalidArgument)
+        }
+    }
 }
 
 fn read_pipe(
@@ -1851,6 +1914,9 @@ fn terminate_process(pid: u64, signal: u64) -> Result<u64, SyscallError> {
             Ok(0)
         }
         Ok(crate::user::process::SignalDelivery::Terminated(report)) => {
+            if report.parent_woken {
+                crate::user::program::take_user_shell_wait_request_for_child(report.pid);
+            }
             crate::serial_println!(
                 "[SIGNAL] delivered caller={} pid={} name={} signal={} status={} job={:?} parent={:?} parent_woken={}",
                 caller_pid,
@@ -2081,7 +2147,10 @@ pub fn close_process_files(pid: crate::user::process::Pid) {
 
 fn close_descriptor(pid: crate::user::process::Pid, file: OpenFile) {
     match file.descriptor {
-        Descriptor::File { path, .. } => {
+        Descriptor::File { target, .. } => {
+            crate::serial_println!("[FD] pid={} close fd={} path={}", pid, file.fd, target.path);
+        }
+        Descriptor::Directory { path, .. } => {
             crate::serial_println!("[FD] pid={} close fd={} path={}", pid, file.fd, path);
         }
         Descriptor::PipeRead { pipe_id } | Descriptor::PipeWrite { pipe_id } => {
@@ -2094,7 +2163,7 @@ fn close_descriptor(pid: crate::user::process::Pid, file: OpenFile) {
                 match file.descriptor {
                     Descriptor::PipeRead { .. } => pipe.readers = pipe.readers.saturating_sub(1),
                     Descriptor::PipeWrite { .. } => pipe.writers = pipe.writers.saturating_sub(1),
-                    Descriptor::File { .. } => unreachable!(),
+                    Descriptor::File { .. } | Descriptor::Directory { .. } => unreachable!(),
                 }
                 crate::serial_println!(
                     "[PIPE] pid={} close id={} fd={} readers={} writers={}",
@@ -2179,26 +2248,6 @@ fn copy_to_user_buffer(dst_ptr: u64, dst_len: u64, data: &[u8]) -> Result<u64, S
     Ok(data.len() as u64)
 }
 
-fn copy_piece_to_user(
-    dst_ptr: u64,
-    dst_len: u64,
-    offset: u64,
-    data: &[u8],
-) -> Result<u64, SyscallError> {
-    let next = offset
-        .checked_add(data.len() as u64)
-        .ok_or(SyscallError::InvalidArgument)?;
-    if next > dst_len {
-        return Err(SyscallError::InvalidArgument);
-    }
-
-    let out = user_write_range(dst_ptr + offset, data.len() as u64)?;
-    unsafe {
-        core::ptr::copy_nonoverlapping(data.as_ptr(), out.as_mut_ptr(), data.len());
-    }
-    Ok(data.len() as u64)
-}
-
 fn user_read_range(ptr: u64, len: u64) -> Result<UserRange, SyscallError> {
     UserRange::checked(ptr, len, UserAccess::Read)
 }
@@ -2242,9 +2291,9 @@ fn format_u64_decimal(mut value: u64, out: &mut [u8; 20]) -> usize {
 #[cfg(test)]
 mod tests {
     use super::{
-        ABI_VERSION, Event, FIRST_USER_FD, MessageQueue, OpenFile, OpenFileData, Pipe, STDIN,
-        SYS_ABI_INFO, SYS_GETGID, SYS_GETUID, SYS_LISTDIR, SYS_READ, SYS_UPTIME, SYS_WHOAMI,
-        SYS_WRITE, SyscallError, SyscallFrame, dispatch, next_fd_for_pid,
+        ABI_VERSION, Event, FIRST_USER_FD, MessageQueue, OpenFile, Pipe, STDIN, SYS_ABI_INFO,
+        SYS_GETGID, SYS_GETUID, SYS_LISTDIR, SYS_READ, SYS_UPTIME, SYS_WHOAMI, SYS_WRITE,
+        SyscallError, SyscallFrame, dispatch, next_fd_for_pid,
     };
 
     fn frame(number: u64) -> SyscallFrame {
@@ -2314,8 +2363,7 @@ mod tests {
             pid: 2,
             fd: FIRST_USER_FD,
             descriptor: super::Descriptor::File {
-                path: "/README",
-                data: OpenFileData::Static(b""),
+                target: crate::fs::open_from("/", "/README").unwrap(),
                 offset: 0,
             },
         });

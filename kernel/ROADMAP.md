@@ -293,7 +293,7 @@ dan user mode.
 
 ## Milestone 15: Userland Init And Shell
 
-- [x] Tambah `/bin/init` minimal sebagai userland process.
+- [x] Tambah `/bin/init` sebagai persistent userland service manager.
 - [x] Tambah manual/boot policy untuk launch `/bin/init`.
 - [x] Boot kernel -> `/bin/init`.
 - [x] Tambah syscall `SYS_EXEC` prototype untuk chain userland program.
@@ -313,7 +313,7 @@ dan user mode.
 - [x] Mark exited child process sebagai `Zombie` sehingga parent collect status.
 - [x] Reap waited child process sebelum respawn `/bin/sh` bridge.
 - [x] Tambah `SYS_PROCS` dan `/bin/procs` untuk inspect process table dari userland.
-- [x] Tambah init reaper untuk collect orphan/kernel-parented zombie process.
+- [x] Tambah kernel fallback reaper untuk zombie yang parent-nya sudah tiada.
 - [x] Track `waiting_for` PID semasa `/bin/sh` panggil waitpid bridge.
 - [x] Capture user `RIP/RSP/RFLAGS` semasa waitpid sebagai resume context prototype.
 - [x] Tukar `SYS_WAIT` supaya parent shell yield ke kernel scheduler, bukan return terus.
@@ -618,21 +618,56 @@ kepada platform OS yang boleh dibandingkan dengan kernel mainstream secara berpe
 - [x] Page-align userland text/rodata/data melalui linker script.
 - [x] Lulus full Docker/QEMU regression selepas hardening.
 
-### Phase C: Persistent System Foundation
+### Phase C: Persistent System Foundation [COMPLETE]
 
-- [ ] Writable filesystem dengan metadata dan directory tree sebenar.
-- [ ] VFS layer supaya filesystem backend boleh ditukar.
-- [ ] Init/service manager yang boleh spawn dan monitor services.
-- [ ] Device namespace:
-  - [ ] `/dev`
-  - [ ] driver registry
-  - [ ] user-visible device info
-- [ ] Package/build layout untuk kernel + userland + initrd.
+- [x] Writable filesystem dengan metadata asas dan directory tree sebenar.
+  - [x] Tambah mutable inode store dan `/tmp` directory node.
+  - [x] Sambungkan live inode read/write kepada process-owned file descriptor.
+  - [x] Implement create, write, unlink, dan rename untuk direct child `/tmp`.
+  - [x] Tambah `/bin/touch`, `/bin/write`, `/bin/rm`, dan `/bin/mv`.
+  - [x] Tambah VANTFS block-backed filesystem pada `/persist`.
+  - [x] Tambah ATA PIO polling path untuk dedicated QEMU persistence disk.
+  - [x] Buktikan data survive dua boot QEMU menggunakan disk image sama.
+  - [x] Tambah nested mutable directories.
+  - [x] Tambah `mkdir`/`rmdir` dengan empty-directory guard.
+  - [x] Kekalkan compatibility entry VANTFS lama sebagai root file.
+  - [x] Defer metadata lanjutan ke filesystem hardening selepas package foundation.
+- [x] VFS layer supaya filesystem backend boleh ditukar.
+  - [x] Tambah object-safe filesystem backend contract.
+  - [x] Tambah mount table dan longest-prefix path resolver.
+  - [x] Gunakan `(mount_id, inode)` sebagai identiti node global.
+  - [x] Pindahkan RAM filesystem ke backend berasingan.
+  - [x] Reject rename merentas backend dengan cross-device error.
+- [x] Init/service manager yang boleh spawn dan monitor services.
+  - [x] Reserve PID 0 untuk kernel task dan PID 1 sebenar untuk `/bin/init`.
+  - [x] Jalankan `/bin/init` tanpa parent sebagai root session leader.
+  - [x] Supervise `/bin/login` menggunakan blocking `waitpid`.
+  - [x] Restart login selepas exit dengan restart backoff.
+  - [x] Kekalkan zombie child PID 1 sehingga dikutip oleh service manager.
+  - [x] Tambah QEMU regression yang terminate login dan sahkan respawn.
+- [x] Device namespace:
+  - [x] Mount `devfs` pada `/dev` melalui VFS.
+  - [x] Expose `/dev/null` dan `/dev/zero` dengan device read/write semantics.
+  - [x] Gunakan driver status table sebagai kernel driver registry.
+  - [x] Expose live `/dev/drivers`, `/dev/pci`, dan `/dev/net`.
+  - [x] Tambah QEMU regression untuk device nodes dan registry views.
+- [x] Package/build layout untuk kernel + userland + initrd.
+  - [x] Bina canonical initrd daripada generated userland registry.
+  - [x] Tambah deterministic initrd dan package manifests dengan SHA-256.
+  - [x] Package kernel image, initrd, blank persistence disk, dan metadata.
+  - [x] Tambah `make initrd`, `make package`, dan `make package-test`.
+  - [x] Buktikan rebuild dengan `SOURCE_DATE_EPOCH` sama menghasilkan hash sama.
+
+Deferred filesystem hardening:
+
+- [ ] Tambah timestamp, ownership, permissions, dan link count.
+- [ ] Enforce access mode dan ownership dalam VFS/syscall path.
 
 ### Phase D: Hardware And I/O Maturity
 
 - [ ] Storage driver path:
-  - [ ] ATA/AHCI/NVMe roadmap
+  - [x] ATA PIO polling baseline untuk persistence disk.
+  - [ ] AHCI/NVMe roadmap
   - [ ] block cache
   - [ ] partition parser
 - [ ] Network stack roadmap:

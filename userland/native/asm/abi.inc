@@ -8,6 +8,7 @@ ORG USER_BASE
 %define SYS_WHOAMI     6
 %define SYS_LISTDIR    7
 %define SYS_READ_FILE  8
+%define SYS_STAT       9
 %define SYS_OPEN       10
 %define SYS_READ       11
 %define SYS_CLOSE      12
@@ -35,9 +36,14 @@ ORG USER_BASE
 %define SYS_SETPGID       47
 %define SYS_GETSID        48
 %define SYS_SETSID        49
+%define SYS_CREATE        50
+%define SYS_UNLINK        51
+%define SYS_RENAME        52
+%define SYS_MKDIR         53
+%define SYS_RMDIR         54
 
 %define ABI_VERSION_MAJOR 1
-%define ABI_VERSION_MINOR 10
+%define ABI_VERSION_MINOR 12
 
 %define ERR_UNKNOWN_SYSCALL -1
 %define ERR_INVALID_ARGUMENT -2
@@ -70,3 +76,10 @@ ORG USER_BASE
 %define IO_BUF_LEN 128
 %define CAT_ERROR_LEN 15
 %define LS_ERROR_LEN 14
+%define TOUCH_ERROR_LEN CAT_ERROR_LEN
+%define WRITE_ERROR_LEN CAT_ERROR_LEN
+%define RM_ERROR_LEN CAT_ERROR_LEN
+%define MV_ERROR_LEN CAT_ERROR_LEN
+%define MKDIR_ERROR_LEN CAT_ERROR_LEN
+%define RMDIR_ERROR_LEN CAT_ERROR_LEN
+%define CAT_NOT_FILE_LEN 16

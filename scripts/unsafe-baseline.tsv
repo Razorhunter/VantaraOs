@@ -18,11 +18,12 @@ kernel/src/scheduler/context.rs	1
 kernel/src/scheduler/mod.rs	2
 kernel/src/scheduler/task.rs	1
 kernel/src/serial.rs	1
+kernel/src/storage/ata.rs	6
 kernel/src/timer.rs	1
 kernel/src/user/address_space.rs	72
 kernel/src/user/elf.rs	2
 kernel/src/user/loader.rs	3
 kernel/src/user/process.rs	1
 kernel/src/user/ring3.rs	31
-kernel/src/user/syscall.rs	14
+kernel/src/user/syscall.rs	12
 kernel/src/vga_buffer.rs	1

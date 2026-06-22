@@ -1,5 +1,18 @@
 %include "abi.inc"
 
+mov rax, SYS_STAT
+mov rdi, ARG_PATH
+mov rsi, [abs ARG_LEN]
+mov rdx, IO_BUF
+mov r10, 32
+int 0x80
+
+test rax, rax
+js .error
+
+cmp qword [abs IO_BUF + 16], 1
+jne .not_file
+
 mov rax, SYS_OPEN
 mov rdi, ARG_PATH
 mov rsi, [abs ARG_LEN]
@@ -56,3 +69,19 @@ mov rdi, 1
 int 0x80
 
 jmp $
+
+.not_file:
+mov rax, SYS_WRITE
+mov rdi, STDOUT
+mov rsi, CAT_NOT_FILE
+mov rdx, CAT_NOT_FILE_LEN
+int 0x80
+
+mov rax, SYS_EXIT
+mov rdi, 1
+int 0x80
+
+jmp $
+
+CAT_NOT_FILE:
+db "cat: not a file", 10

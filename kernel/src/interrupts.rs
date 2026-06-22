@@ -304,6 +304,16 @@ extern "x86-interrupt" fn page_fault_handler(
         crate::user::syscall::user_exit_landing();
     }
 
+    let kernel_fault_addr = match Cr2::read() {
+        Ok(addr) => addr.as_u64(),
+        Err(raw) => raw.0,
+    };
+    crate::serial_println!(
+        "[KERNEL FAULT] page addr={:#x} rip={:#x} error_bits={:#x}",
+        kernel_fault_addr,
+        stack_frame.instruction_pointer.as_u64(),
+        error_code.bits()
+    );
     panic!(
         "EXCEPTION: PAGE FAULT\naccessed={:?}\nerror={:?}\n{:#?}",
         Cr2::read(),

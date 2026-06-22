@@ -112,6 +112,7 @@ fn kernel_main(boot_info: &'static BootInfo) -> ! {
         Ok(frame) => serial_println!("[USER] CR3 smoke switch ok: p4={:#x}", frame),
         Err(err) => serial_println!("[USER] CR3 smoke switch skipped: {:?}", err),
     }
+    kernel::fs::init();
     kernel::interrupts::enable();
     kernel::diagnostics::mark_interrupts();
     kernel::diagnostics::print_summary();
@@ -180,8 +181,7 @@ fn kernel_main(boot_info: &'static BootInfo) -> ! {
     kernel::drivers::network::init();
     kernel::drivers::usb_host::init_usb();
     kernel::diagnostics::mark_usb();
-    kernel::fs::init();
-    match kernel::user::program::request_path("init") {
+    match kernel::user::program::request_boot_init() {
         Ok(pid) => serial_println!("[USER] boot policy queued /bin/init pid={}", pid),
         Err(err) => serial_println!("[USER] boot policy skipped /bin/init: {:?}", err),
     }

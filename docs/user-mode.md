@@ -53,9 +53,12 @@ Milestone 10.1 adds the first Ring-3 building blocks:
 - an `iretq` transition helper
 - a controlled `userboot` shell command
 
-The normal boot path queues `/bin/init`, which launches login and `/bin/sh`.
-The kernel shell remains available only as a development and diagnostic
-surface.
+The normal boot path reserves PID 1 for `/bin/init`. The kernel task owner uses
+PID 0, so init is a real parentless user process and session leader. Init
+supervises `/bin/login` with blocking `waitpid`, logs service transitions, and
+restarts login after it exits. Login continues to launch and wait for
+`/bin/sh`. The kernel shell remains available only as a development and
+diagnostic surface.
 
 The first user task currently exits through `SYS_EXIT`. The syscall marks the
 process as exited, re-enables interrupts, reprints the shell prompt, and enters
@@ -95,9 +98,10 @@ private frames for all stack slots; the kernel reserves, clears, and reuses
 those slots without runtime allocation. The older user-supplied-stack
 `SYS_THREAD_CREATE` remains ABI-compatible.
 
-The current process table creates a placeholder init process and registers a
-first Ring-3 task prototype so kernel-side tools can inspect process state
-before Ring-3 execution is enabled.
+The process table reserves PID 0 for kernel threads and PID 1 for the userland
+service manager. Children of a live PID 1 remain zombies until init collects
+their status. The kernel orphan reaper only takes over when a process has no
+living parent.
 
 ## ELF Loader Prototype
 
