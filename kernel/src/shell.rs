@@ -132,12 +132,8 @@ fn execute_command(command: &str) -> bool {
             }
             None => println!("usage: run <path>"),
         },
-        "bin" => match fs::list("/bin") {
-            Ok(entries) => {
-                for entry in entries {
-                    println!("/bin/{}", entry);
-                }
-            }
+        "bin" => match list_directory("/bin") {
+            Ok(()) => {}
             Err(_) => println!("bin: /bin: not found"),
         },
         "bootinit" => {
@@ -176,6 +172,16 @@ fn execute_command(command: &str) -> bool {
     }
 
     true
+}
+
+fn list_directory(path: &str) -> Result<(), fs::FsError> {
+    let mut buffer = [0u8; 2048];
+    let len = fs::list_to_buffer("/", path, &mut buffer)?;
+    let text = core::str::from_utf8(&buffer[..len]).map_err(|_| fs::FsError::InvalidPath)?;
+    for entry in text.lines() {
+        println!("{}/{}", path.trim_end_matches('/'), entry);
+    }
+    Ok(())
 }
 
 fn request_user_program_arg(path: &str, arg: Option<&str>) {

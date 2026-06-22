@@ -15,4 +15,7 @@ pub trait BlockDevice {
 pub enum BlockError {
     OutOfRange,
     ReadOnly,
+    NoDevice,
+    Timeout,
+    DeviceFault,
 }

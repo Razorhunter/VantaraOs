@@ -2,22 +2,10 @@
 
 Common Vantara OS QEMU commands.
 
-## Headless Serial
+## Run
 
 ```bash
-make kernel-headless
-```
-
-## Windowed
-
-```bash
-make kernel-run
-```
-
-## VNC
-
-```bash
-make kernel-vnc
+make run
 ```
 
 Connect to:
@@ -26,12 +14,41 @@ Connect to:
 localhost:5900
 ```
 
+The run target attaches:
+
+- the kernel boot image as IDE disk 0;
+- `target/vantara-persist.img` as IDE disk 1.
+
+The persistence image is created only when absent. Re-running QEMU preserves
+files written under `/persist`.
+
+Reset the volume explicitly:
+
+```bash
+make reset-persist
+```
+
+Run QEMU from the Docker builder:
+
+```bash
+make docker-run
+```
+
+Then connect a VNC client to `localhost:5901`. Override the Docker port/display
+when needed:
+
+```bash
+make docker-run DOCKER_VNC_PORT=5902 DOCKER_VNC_DISPLAY=2
+```
+
 ## Smoke Test
 
 ```bash
 make smoke
 make boot-test
 make command-smoke
+make filesystem-write-test
+make filesystem-persistence-test
 make isolation-test
 make artifact-manifest
 ```

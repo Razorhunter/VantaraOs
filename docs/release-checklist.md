@@ -34,10 +34,10 @@ make fmt
 make check
 ```
 
-- [ ] Build the boot image and refresh the artifact manifest:
+- [ ] Build the boot image, initrd, and development package:
 
 ```bash
-make kernel-build
+make package-test
 ```
 
 - [ ] Confirm these files exist:
@@ -47,6 +47,9 @@ kernel/target/x86_64-vantara_os/debug/bootimage-kernel.bin
 target/generated/build-metadata.tsv
 target/generated/userland_images.rs
 target/artifact-manifest.tsv
+target/vantara-initrd.tar
+target/initrd-manifest.tsv
+target/vantara-dev.tar.gz
 ```
 
 ## 3. QEMU Regression Suite
@@ -61,6 +64,18 @@ make smoke
 
 ```bash
 make boot-test
+```
+
+- [ ] PID 1 service supervision and login restart test passes:
+
+```bash
+make service-manager-test
+```
+
+- [ ] Device namespace and live driver registry test passes:
+
+```bash
+make device-namespace-test
 ```
 
 - [ ] Golden-output command tests pass for `ls`, `cat`, `procs`, and
@@ -94,7 +109,8 @@ command, process, memory-isolation, syscall-pointer, and CPU-exception suites.
 - [ ] Confirm version, Git state, and timestamp are expected.
 - [ ] Review `target/artifact-manifest.tsv`.
 - [ ] Confirm the manifest includes one kernel image, build metadata, generated
-      registry, and every intended userland `.bin`/`.elf`.
+      registry, and one canonical artifact per userland program.
+- [ ] Confirm `make package-test` verifies the initrd and package manifests.
 - [ ] Verify every manifest size and SHA-256 digest:
 
 ```bash
@@ -113,7 +129,7 @@ done
 - [ ] Boot the image interactively:
 
 ```bash
-make kernel-run
+make run
 ```
 
 - [ ] Confirm the serial/VGA banner shows the expected build metadata.

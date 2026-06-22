@@ -98,6 +98,21 @@ kernel-space, and ownerless ranges before dereferencing them.
 | 47 | `SYS_SETPGID` | pid or 0, process-group ID or 0 | resulting process-group ID |
 | 48 | `SYS_GETSID` | pid or 0 | session ID |
 | 49 | `SYS_SETSID` | none | new session ID or error |
+| 50 | `SYS_CREATE` | `path_ptr`, `path_len` | writable fd or error |
+| 51 | `SYS_UNLINK` | `path_ptr`, `path_len` | 0 or error |
+| 52 | `SYS_RENAME` | `old_ptr`, `old_len`, `new_ptr`, `new_len` | 0 or error |
+| 53 | `SYS_MKDIR` | `path_ptr`, `path_len` | 0 or error |
+| 54 | `SYS_RMDIR` | `path_ptr`, `path_len` | 0 or error |
+
+ABI v1.11 adds writable files. `SYS_CREATE` creates an empty file and
+returns a descriptor at offset zero. Existing `SYS_WRITE` writes through that
+descriptor, while stdout/stderr and pipe behavior remain unchanged.
+`SYS_UNLINK` rejects read-only, directory, and currently-open targets.
+`SYS_RENAME` permits moves within one mounted filesystem.
+
+ABI v1.12 adds directory mutation. `SYS_MKDIR` creates one directory after its
+parent has been resolved. `SYS_RMDIR` removes only empty directories and rejects
+filesystem roots. `SYS_UNLINK` remains file-only.
 
 `SYS_THREAD_CREATE` starts a thread in the caller's process and address space.
 The caller supplies a writable, non-overlapping stack buffer of at least 1024

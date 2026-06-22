@@ -56,19 +56,26 @@ kernel/target/x86_64-vantara_os/debug/bootimage-kernel.bin
 ## Run
 
 ```bash
-make kernel-run
+make run
 ```
 
-Headless serial-only run:
+Every normal run attaches `target/vantara-persist.img` as the second disk.
+The image is created once and reused, so files under `/persist` survive QEMU
+restarts. QEMU exposes its display through VNC at `localhost:5900`.
+
+Run through Docker and connect a VNC client to `localhost:5901`:
 
 ```bash
-make kernel-headless
+make docker-run
 ```
 
-VNC run:
+The Docker target uses VNC display `:1` by default to avoid colliding with a
+host-side `make run` session on port 5900.
+
+To deliberately erase persistent filesystem data:
 
 ```bash
-make kernel-vnc
+make reset-persist
 ```
 
 ## Test
@@ -84,6 +91,7 @@ make command-smoke
 make preemption-test
 make isolation-test
 make artifact-manifest
+make package-test
 ```
 
 `kernel-check` performs a compile check for the kernel and integration tests.
@@ -94,6 +102,10 @@ memory, syscall, filesystem, and boot QEMU quality gate used by local CI.
 invariants documented in [`docs/unsafe-audit.md`](docs/unsafe-audit.md).
 `smoke` runs a headless QEMU boot and checks serial output for core boot markers.
 `boot-test` verifies the automatic `/bin/init -> login -> sh` path.
+`service-manager-test` verifies that the real PID 1 supervises `/bin/login` and
+restarts it after termination.
+`device-namespace-test` verifies the `/dev` mount, null/zero device semantics,
+and live driver, PCI, and network registry views.
 `command-smoke` boots an isolated QEMU guest for each of `ls`, `cat`, `procs`,
 and `rusthello`, then compares its serial output with stable golden snippets.
 `preemption-test` proves that a CPU-bound background process which never calls
@@ -103,8 +115,12 @@ and `rusthello`, then compares its serial output with stable golden snippets.
 that only the offending process dies, then runs `rusthello` to prove recovery.
 `artifact-manifest` writes `target/artifact-manifest.tsv` with the relative path,
 byte size, and SHA-256 digest of the boot image, generated userland registry,
-build metadata, and every `.bin`/`.elf` userland artifact. `kernel-build`
-refreshes it automatically. The boot banner reports version, profile, Git
+and canonical userland artifacts.
+`package-test` builds and verifies `target/vantara-dev.tar.gz`, containing the
+kernel boot image, canonical initrd, blank persistence disk, and integrity
+metadata. See [`docs/packaging.md`](docs/packaging.md).
+`kernel-build` refreshes the source artifact manifest automatically. The boot
+banner reports version, profile, Git
 commit/dirty state, and build timestamp. Set `SOURCE_DATE_EPOCH` for a
 reproducible UTC timestamp, or override with `VANTARA_BUILD_TIMESTAMP`,
 `VANTARA_GIT_COMMIT`, and `VANTARA_GIT_DIRTY`.
@@ -129,6 +145,7 @@ Before sharing a development image, complete
 - PCI discovery and UHCI lookup through PCI BARs
 - PS/2 controller initialization
 - read-only RAM filesystem with `ls`, `cat`, and `stat`
+- nested writable `/tmp` RAM filesystem and persistent `/persist` VANTFS volume
 - user-mode preparation: syscall ABI, process model, ELF parser prototype
 - reserved write filesystem shell commands: `cp`, `mv`, `rm`
 - boot banner and serial boot self-check summary
