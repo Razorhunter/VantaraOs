@@ -20,6 +20,15 @@ pub struct PciDevice {
     pub header_type: u8,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PciBar {
+    Memory32 { address: u64, prefetchable: bool },
+    Memory64 { address: u64, prefetchable: bool },
+    Io { address: u32 },
+    Unused,
+    Invalid,
+}
+
 lazy_static! {
     static ref DEVICES: Mutex<Vec<PciDevice>> = Mutex::new(Vec::new());
 }
@@ -117,6 +126,43 @@ pub fn read_bar(device: PciDevice, bar_index: u8) -> u32 {
         device.function,
         0x10 + bar_index * 4,
     )
+}
+
+pub fn read_bar_info(device: PciDevice, bar_index: u8) -> PciBar {
+    if bar_index >= 6 {
+        return PciBar::Invalid;
+    }
+    let low = read_bar(device, bar_index);
+    let high = if bar_index < 5 {
+        read_bar(device, bar_index + 1)
+    } else {
+        0
+    };
+    decode_bar(low, high, bar_index < 5)
+}
+
+fn decode_bar(low: u32, high: u32, has_high: bool) -> PciBar {
+    if low == 0 {
+        return PciBar::Unused;
+    }
+    if low & 1 != 0 {
+        return PciBar::Io {
+            address: low & !0x3,
+        };
+    }
+
+    let prefetchable = low & 0x8 != 0;
+    match (low >> 1) & 0x3 {
+        0 => PciBar::Memory32 {
+            address: u64::from(low & !0xf),
+            prefetchable,
+        },
+        2 if has_high => PciBar::Memory64 {
+            address: (u64::from(high) << 32) | u64::from(low & !0xf),
+            prefetchable,
+        },
+        _ => PciBar::Invalid,
+    }
 }
 
 pub fn scan_bus() -> Vec<PciDevice> {
@@ -256,6 +302,42 @@ impl<'a> BufferWriter<'a> {
             value => b'a' + (value - 10),
         };
         self.write_byte(digit);
+    }
+}
+
+#[cfg(test)]
+mod bar_tests {
+    use super::{PciBar, decode_bar};
+
+    #[test_case]
+    fn decodes_32_bit_memory_bar() {
+        assert_eq!(
+            decode_bar(0xfebf_0000, 0, true),
+            PciBar::Memory32 {
+                address: 0xfebf_0000,
+                prefetchable: false,
+            }
+        );
+    }
+
+    #[test_case]
+    fn decodes_64_bit_memory_bar() {
+        assert_eq!(
+            decode_bar(0x2345_6004, 0x0000_0001, true),
+            PciBar::Memory64 {
+                address: 0x0000_0001_2345_6000,
+                prefetchable: false,
+            }
+        );
+    }
+
+    #[test_case]
+    fn decodes_io_and_rejects_truncated_64_bit_bar() {
+        assert_eq!(
+            decode_bar(0x0000_c001, 0, true),
+            PciBar::Io { address: 0xc000 }
+        );
+        assert_eq!(decode_bar(0x1004, 0, false), PciBar::Invalid);
     }
 }
 

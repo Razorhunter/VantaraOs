@@ -668,6 +668,14 @@ Deferred filesystem hardening:
 - [ ] Storage driver path:
   - [x] ATA PIO polling baseline untuk persistence disk.
   - [ ] AHCI/NVMe roadmap
+    - [x] Detect PCI AHCI class `01/06/01`.
+    - [x] Decode 32-bit/64-bit PCI BAR dan validate ABAR5 memory BAR.
+    - [x] Tambah AHCI controller registry dan `/dev/ahci`.
+    - [x] Tambah Q35 QEMU discovery regression.
+    - [ ] Tambah audited PCI MMIO mapper untuk ABAR.
+    - [ ] Parse HBA capabilities/version/implemented ports.
+    - [ ] Implement AHCI command list/FIS/PRDT dan DMA I/O.
+    - [ ] Tambah NVMe PCI discovery dan queue roadmap.
   - [x] block cache
     - [x] Tambah bounded 16-sector LRU cache di atas `BlockDevice`.
     - [x] Gunakan write-through policy supaya persistence semantics kekal selamat.

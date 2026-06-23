@@ -90,6 +90,12 @@ make block-cache-test
 make partition-test
 ```
 
+- [ ] Q35 AHCI PCI and ABAR discovery test passes:
+
+```bash
+make ahci-test
+```
+
 - [ ] Golden-output command tests pass for `ls`, `cat`, `procs`, and
       `rusthello`:
 

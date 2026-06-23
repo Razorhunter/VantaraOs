@@ -94,6 +94,7 @@ make artifact-manifest
 make package-test
 make block-cache-test
 make partition-test
+make ahci-test
 ```
 
 `kernel-check` performs a compile check for the kernel and integration tests.
@@ -112,6 +113,8 @@ and live driver, PCI, and network registry views.
 operations in QEMU.
 `partition-test` verifies MBR discovery, partition-relative VANTFS I/O, and
 data persistence across reboot.
+`ahci-test` boots QEMU Q35 and verifies PCI AHCI controller and ABAR discovery.
+See [`docs/storage.md`](docs/storage.md).
 `command-smoke` boots an isolated QEMU guest for each of `ls`, `cat`, `procs`,
 and `rusthello`, then compares its serial output with stable golden snippets.
 `preemption-test` proves that a CPU-bound background process which never calls

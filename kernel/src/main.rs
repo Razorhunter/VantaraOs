@@ -178,6 +178,7 @@ fn kernel_main(boot_info: &'static BootInfo) -> ! {
     kernel::shell::init();
 
     kernel::drivers::pci::init();
+    kernel::drivers::ahci::init();
     kernel::drivers::network::init();
     kernel::drivers::usb_host::init_usb();
     kernel::diagnostics::mark_usb();

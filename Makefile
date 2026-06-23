@@ -44,7 +44,7 @@ COMMAND_SMOKE_TARGETS := $(addprefix command-smoke-,$(COMMAND_SMOKE_CASES))
 	smoke boot-test command-smoke $(COMMAND_SMOKE_TARGETS) \
 	service-manager-test device-namespace-test \
 	filesystem-write-test filesystem-persistence-test block-cache-test partition-test \
-	preemption-test \
+	ahci-test preemption-test \
 	kernel-thread-preemption-test signal-test terminal-signal-test isolation-test \
 	regression ci \
 	clean kernel-clean userland-clean
@@ -74,6 +74,7 @@ help:
 	@echo "  make filesystem-persistence-test"
 	@echo "  make block-cache-test"
 	@echo "  make partition-test"
+	@echo "  make ahci-test"
 	@echo "  make preemption-test"
 	@echo "  make kernel-thread-preemption-test"
 	@echo "  make signal-test"
@@ -231,6 +232,9 @@ block-cache-test: kernel-build
 
 partition-test: kernel-build
 	QEMU="$(QEMU)" bash scripts/qemu-partition-parser.sh
+
+ahci-test: kernel-build
+	QEMU="$(QEMU)" bash scripts/qemu-ahci-discovery.sh
 
 preemption-test: kernel-build
 	QEMU="$(QEMU)" bash scripts/qemu-preemption.sh
