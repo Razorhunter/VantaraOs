@@ -92,6 +92,8 @@ make preemption-test
 make isolation-test
 make artifact-manifest
 make package-test
+make block-cache-test
+make partition-test
 ```
 
 `kernel-check` performs a compile check for the kernel and integration tests.
@@ -106,6 +108,10 @@ invariants documented in [`docs/unsafe-audit.md`](docs/unsafe-audit.md).
 restarts it after termination.
 `device-namespace-test` verifies the `/dev` mount, null/zero device semantics,
 and live driver, PCI, and network registry views.
+`block-cache-test` verifies non-zero VANTFS cache hits, misses, and write-through
+operations in QEMU.
+`partition-test` verifies MBR discovery, partition-relative VANTFS I/O, and
+data persistence across reboot.
 `command-smoke` boots an isolated QEMU guest for each of `ls`, `cat`, `procs`,
 and `rusthello`, then compares its serial output with stable golden snippets.
 `preemption-test` proves that a CPU-bound background process which never calls

@@ -20,7 +20,7 @@ impl BlockDevice for RamDisk {
     }
 
     fn read_block(
-        &self,
+        &mut self,
         block_index: u64,
         buffer: &mut [u8; BLOCK_SIZE],
     ) -> Result<(), BlockError> {

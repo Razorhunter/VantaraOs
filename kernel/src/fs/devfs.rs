@@ -6,6 +6,8 @@ const ZERO_INODE: u64 = 3;
 const DRIVERS_INODE: u64 = 4;
 const PCI_INODE: u64 = 5;
 const NET_INODE: u64 = 6;
+const BLOCK_CACHE_INODE: u64 = 7;
+const PARTITIONS_INODE: u64 = 8;
 const SNAPSHOT_SIZE: usize = 2048;
 
 pub struct DeviceFilesystem;
@@ -21,7 +23,9 @@ impl DeviceFilesystem {
             crate::drivers::status::DriverState::Ready,
             "mounted at /dev",
         );
-        crate::serial_println!("[DEVFS] ready: nodes=null,zero,drivers,pci,net");
+        crate::serial_println!(
+            "[DEVFS] ready: nodes=null,zero,drivers,pci,net,block-cache,partitions"
+        );
     }
 }
 
@@ -35,7 +39,15 @@ impl FilesystemBackend for DeviceFilesystem {
             return Err(FsError::NotDirectory);
         }
         let mut written = 0;
-        for name in ["null", "zero", "drivers", "pci", "net"] {
+        for name in [
+            "null",
+            "zero",
+            "drivers",
+            "pci",
+            "net",
+            "block-cache",
+            "partitions",
+        ] {
             written = append_line(out, written, name.as_bytes())?;
         }
         Ok(written)
@@ -43,7 +55,7 @@ impl FilesystemBackend for DeviceFilesystem {
 
     fn stat(&self, path: &str) -> Result<BackendStat, FsError> {
         let (file_type, size, readonly, inode) = match path {
-            "/" => (FileType::Directory, 5, true, ROOT_INODE),
+            "/" => (FileType::Directory, 7, true, ROOT_INODE),
             "/null" => (FileType::File, 0, false, NULL_INODE),
             "/zero" => (FileType::File, 0, false, ZERO_INODE),
             "/drivers" => (
@@ -63,6 +75,18 @@ impl FilesystemBackend for DeviceFilesystem {
                 snapshot_len(crate::drivers::network::write_devices_to_buffer),
                 true,
                 NET_INODE,
+            ),
+            "/block-cache" => (
+                FileType::File,
+                snapshot_len(super::persistent::write_cache_stats_to_buffer),
+                true,
+                BLOCK_CACHE_INODE,
+            ),
+            "/partitions" => (
+                FileType::File,
+                snapshot_len(super::persistent::write_partition_info_to_buffer),
+                true,
+                PARTITIONS_INODE,
             ),
             _ => return Err(FsError::NotFound),
         };
@@ -88,6 +112,14 @@ impl FilesystemBackend for DeviceFilesystem {
                 out,
                 crate::drivers::network::write_devices_to_buffer,
             ),
+            BLOCK_CACHE_INODE => {
+                read_snapshot(offset, out, super::persistent::write_cache_stats_to_buffer)
+            }
+            PARTITIONS_INODE => read_snapshot(
+                offset,
+                out,
+                super::persistent::write_partition_info_to_buffer,
+            ),
             ROOT_INODE => Err(FsError::IsDirectory),
             _ => Err(FsError::NotFound),
         }
@@ -96,7 +128,9 @@ impl FilesystemBackend for DeviceFilesystem {
     fn write(&self, inode: u64, _offset: usize, source: &[u8]) -> Result<usize, FsError> {
         match inode {
             NULL_INODE | ZERO_INODE => Ok(source.len()),
-            DRIVERS_INODE | PCI_INODE | NET_INODE => Err(FsError::ReadOnly),
+            DRIVERS_INODE | PCI_INODE | NET_INODE | BLOCK_CACHE_INODE | PARTITIONS_INODE => {
+                Err(FsError::ReadOnly)
+            }
             ROOT_INODE => Err(FsError::IsDirectory),
             _ => Err(FsError::NotFound),
         }
@@ -151,7 +185,10 @@ mod tests {
         let devfs = DeviceFilesystem::new();
         let mut out = [0u8; 64];
         let len = devfs.list("/", &mut out).unwrap();
-        assert_eq!(&out[..len], b"null\nzero\ndrivers\npci\nnet\n");
+        assert_eq!(
+            &out[..len],
+            b"null\nzero\ndrivers\npci\nnet\nblock-cache\npartitions\n"
+        );
     }
 
     #[test_case]

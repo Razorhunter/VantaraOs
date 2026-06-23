@@ -3,10 +3,14 @@ use core::sync::atomic::{AtomicBool, Ordering};
 
 use super::{BackendStat, FileType, FilesystemBackend, FsError, append_line};
 use crate::storage::ata::AtaPioDisk;
-use crate::storage::block::{BLOCK_SIZE, BlockDevice};
+use crate::storage::block::{BLOCK_SIZE, BlockDevice, CachedBlockDevice};
+use crate::storage::partition::{
+    PartitionBlockDevice, PartitionError, parse_mbr, select_vantara_partition,
+};
 use crate::sync::PreemptMutex;
 
-const DISK_BLOCKS: u64 = 2048;
+const VOLUME_BLOCKS: u64 = 2048;
+const ATA_ADDRESSABLE_BLOCKS: u64 = 4096;
 const MAGIC: &[u8; 8] = b"VANTFS01";
 const VERSION: u32 = 1;
 const HEADER_BLOCK: u64 = 0;
@@ -18,8 +22,17 @@ const MAX_FILES: usize = DIRECTORY_BLOCKS as usize * BLOCK_SIZE / ENTRY_SIZE;
 const MAX_NAME_LEN: usize = 32;
 const MAX_FILE_SIZE: usize = BLOCK_SIZE * 2;
 const BLOCKS_PER_FILE: u64 = 2;
+const CACHE_ENTRIES: usize = 16;
 
-static DISK: PreemptMutex<AtaPioDisk> = PreemptMutex::new(AtaPioDisk::primary_slave(DISK_BLOCKS));
+type PersistentPartition = PartitionBlockDevice<AtaPioDisk>;
+type PersistentDisk = CachedBlockDevice<PersistentPartition, CACHE_ENTRIES>;
+
+static DISK: PreemptMutex<PersistentDisk> =
+    PreemptMutex::new(PersistentDisk::new(PersistentPartition::new(
+        AtaPioDisk::primary_slave(ATA_ADDRESSABLE_BLOCKS),
+        ATA_ADDRESSABLE_BLOCKS,
+        VOLUME_BLOCKS,
+    )));
 
 pub struct PersistentFilesystem {
     available: AtomicBool,
@@ -47,7 +60,16 @@ impl PersistentFilesystem {
                     crate::drivers::status::DriverState::Ready,
                     detail,
                 );
+                crate::drivers::status::report(
+                    "block-cache",
+                    crate::drivers::status::DriverState::Ready,
+                    "16-sector LRU write-through",
+                );
                 crate::serial_println!("[PERSIST] {}", detail);
+                crate::serial_println!(
+                    "[BLOCKCACHE] ready capacity={} policy=write-through",
+                    CACHE_ENTRIES
+                );
             }
             Err(error) => {
                 self.available.store(false, Ordering::Release);
@@ -67,7 +89,46 @@ impl PersistentFilesystem {
 
     fn initialize_disk(&self) -> Result<bool, FsError> {
         let mut disk = DISK.lock();
-        disk.probe().map_err(|_| FsError::Unavailable)?;
+        let partition = disk.backing_mut();
+        partition
+            .device()
+            .probe()
+            .map_err(|_| FsError::Unavailable)?;
+        let mut mbr = [0u8; BLOCK_SIZE];
+        partition
+            .device_mut()
+            .read_block(0, &mut mbr)
+            .map_err(|_| FsError::Io)?;
+        match parse_mbr(&mbr, ATA_ADDRESSABLE_BLOCKS) {
+            Ok(partitions) => {
+                let selected = select_vantara_partition(&partitions).ok_or(FsError::Unavailable)?;
+                if selected.block_count < VOLUME_BLOCKS {
+                    return Err(FsError::Unavailable);
+                }
+                partition
+                    .configure_partition(selected)
+                    .map_err(|_| FsError::Unavailable)?;
+                crate::serial_println!(
+                    "[PARTITION] MBR type={:#04x} start={} blocks={}",
+                    selected.partition_type,
+                    selected.start_block,
+                    selected.block_count
+                );
+            }
+            Err(PartitionError::MissingSignature) => {
+                partition
+                    .configure_superfloppy(VOLUME_BLOCKS)
+                    .map_err(|_| FsError::Unavailable)?;
+                crate::serial_println!(
+                    "[PARTITION] no MBR; superfloppy start=0 blocks={}",
+                    VOLUME_BLOCKS
+                );
+            }
+            Err(error) => {
+                crate::serial_println!("[PARTITION] invalid MBR: {:?}", error);
+                return Err(FsError::Corrupt);
+            }
+        }
         let mut header = [0u8; BLOCK_SIZE];
         disk.read_block(HEADER_BLOCK, &mut header)
             .map_err(|_| FsError::Io)?;
@@ -86,6 +147,102 @@ impl PersistentFilesystem {
     }
 }
 
+pub(super) fn write_partition_info_to_buffer(out: &mut [u8]) -> usize {
+    let disk = DISK.lock();
+    let partition = disk.backing();
+    let mut writer = CacheStatsWriter::new(out);
+    writer.write_str("VANTFS storage view\nmode ");
+    writer.write_str(if partition.partitioned() {
+        "mbr"
+    } else {
+        "superfloppy"
+    });
+    writer.write_str("\ntype ");
+    writer.write_hex_u8(partition.partition_type());
+    writer.write_str("\nstart_block ");
+    writer.write_dec(partition.start_block());
+    writer.write_str("\nblock_count ");
+    writer.write_dec(partition.block_count());
+    writer.write_byte(b'\n');
+    writer.len()
+}
+
+pub(super) fn write_cache_stats_to_buffer(out: &mut [u8]) -> usize {
+    let disk = DISK.lock();
+    let stats = disk.stats();
+    let mut writer = CacheStatsWriter::new(out);
+    writer.write_str("VANTFS block cache\ncapacity ");
+    writer.write_dec(disk.capacity() as u64);
+    writer.write_str("\nread_hits ");
+    writer.write_dec(stats.read_hits);
+    writer.write_str("\nread_misses ");
+    writer.write_dec(stats.read_misses);
+    writer.write_str("\nwrites ");
+    writer.write_dec(stats.writes);
+    writer.write_str("\nevictions ");
+    writer.write_dec(stats.evictions);
+    writer.write_byte(b'\n');
+    writer.len()
+}
+
+struct CacheStatsWriter<'a> {
+    out: &'a mut [u8],
+    len: usize,
+}
+
+impl<'a> CacheStatsWriter<'a> {
+    fn new(out: &'a mut [u8]) -> Self {
+        Self { out, len: 0 }
+    }
+
+    fn len(&self) -> usize {
+        self.len
+    }
+
+    fn write_byte(&mut self, byte: u8) {
+        if self.len < self.out.len() {
+            self.out[self.len] = byte;
+            self.len += 1;
+        }
+    }
+
+    fn write_str(&mut self, text: &str) {
+        for byte in text.bytes() {
+            self.write_byte(byte);
+        }
+    }
+
+    fn write_dec(&mut self, mut value: u64) {
+        let mut digits = [0u8; 20];
+        let mut len = 0;
+        if value == 0 {
+            self.write_byte(b'0');
+            return;
+        }
+        while value > 0 {
+            digits[len] = b'0' + (value % 10) as u8;
+            value /= 10;
+            len += 1;
+        }
+        while len > 0 {
+            len -= 1;
+            self.write_byte(digits[len]);
+        }
+    }
+
+    fn write_hex_u8(&mut self, value: u8) {
+        self.write_str("0x");
+        for shift in [4, 0] {
+            let nibble = (value >> shift) & 0x0f;
+            self.write_byte(if nibble < 10 {
+                b'0' + nibble
+            } else {
+                b'a' + nibble - 10
+            });
+        }
+    }
+}
+
 impl FilesystemBackend for PersistentFilesystem {
     fn name(&self) -> &'static str {
         "vantfs"
@@ -97,8 +254,8 @@ impl FilesystemBackend for PersistentFilesystem {
 
     fn list(&self, path: &str, out: &mut [u8]) -> Result<usize, FsError> {
         self.ensure_available()?;
-        let disk = DISK.lock();
-        let entries = read_entries(&*disk)?;
+        let mut disk = DISK.lock();
+        let entries = read_entries(&mut *disk)?;
         let parent = resolve_path(&entries, path).ok_or(FsError::NotFound)?;
         if parent != 1
             && entries
@@ -122,8 +279,8 @@ impl FilesystemBackend for PersistentFilesystem {
 
     fn stat(&self, path: &str) -> Result<BackendStat, FsError> {
         self.ensure_available()?;
-        let disk = DISK.lock();
-        let entries = read_entries(&*disk)?;
+        let mut disk = DISK.lock();
+        let entries = read_entries(&mut *disk)?;
         if path == "/" {
             let size = entries
                 .iter()
@@ -156,8 +313,8 @@ impl FilesystemBackend for PersistentFilesystem {
 
     fn read(&self, inode: u64, offset: usize, out: &mut [u8]) -> Result<usize, FsError> {
         self.ensure_available()?;
-        let disk = DISK.lock();
-        let entries = read_entries(&*disk)?;
+        let mut disk = DISK.lock();
+        let entries = read_entries(&mut *disk)?;
         let entry = entries
             .iter()
             .flatten()
@@ -167,7 +324,7 @@ impl FilesystemBackend for PersistentFilesystem {
             return Err(FsError::IsDirectory);
         }
         let count = entry.len.saturating_sub(offset).min(out.len());
-        read_data(&*disk, entry.slot, offset, &mut out[..count])?;
+        read_data(&mut *disk, entry.slot, offset, &mut out[..count])?;
         Ok(count)
     }
 
@@ -180,7 +337,7 @@ impl FilesystemBackend for PersistentFilesystem {
             return Err(FsError::FileTooLarge);
         }
         let mut disk = DISK.lock();
-        let mut entries = read_entries(&*disk)?;
+        let mut entries = read_entries(&mut *disk)?;
         let entry = entries
             .iter_mut()
             .flatten()
@@ -214,7 +371,7 @@ impl FilesystemBackend for PersistentFilesystem {
     fn rename(&self, old_path: &str, new_path: &str) -> Result<u64, FsError> {
         self.ensure_available()?;
         let mut disk = DISK.lock();
-        let entries = read_entries(&*disk)?;
+        let entries = read_entries(&mut *disk)?;
         let inode = resolve_path(&entries, old_path).ok_or(FsError::NotFound)?;
         if inode == 1 {
             return Err(FsError::ReadOnly);
@@ -256,7 +413,7 @@ impl PersistentFilesystem {
         self.ensure_available()?;
         let (parent_path, name) = split_parent_name(path)?;
         let mut disk = DISK.lock();
-        let entries = read_entries(&*disk)?;
+        let entries = read_entries(&mut *disk)?;
         let parent = resolve_path(&entries, parent_path).ok_or(FsError::NotFound)?;
         if parent != 1
             && entries
@@ -285,7 +442,7 @@ impl PersistentFilesystem {
     fn remove_node(&self, path: &str, expected: FileType) -> Result<u64, FsError> {
         self.ensure_available()?;
         let mut disk = DISK.lock();
-        let entries = read_entries(&*disk)?;
+        let entries = read_entries(&mut *disk)?;
         let inode = resolve_path(&entries, path).ok_or(FsError::NotFound)?;
         if inode == 1 {
             return Err(FsError::ReadOnly);
@@ -356,7 +513,7 @@ impl DirectoryEntry {
     }
 }
 
-fn format_volume(disk: &mut AtaPioDisk) -> Result<(), FsError> {
+fn format_volume(disk: &mut impl BlockDevice) -> Result<(), FsError> {
     let mut block = [0u8; BLOCK_SIZE];
     block[..MAGIC.len()].copy_from_slice(MAGIC);
     block[8..12].copy_from_slice(&VERSION.to_le_bytes());
@@ -371,7 +528,7 @@ fn format_volume(disk: &mut AtaPioDisk) -> Result<(), FsError> {
     Ok(())
 }
 
-fn read_entries(disk: &AtaPioDisk) -> Result<Vec<Option<DirectoryEntry>>, FsError> {
+fn read_entries(disk: &mut impl BlockDevice) -> Result<Vec<Option<DirectoryEntry>>, FsError> {
     let mut entries = Vec::with_capacity(MAX_FILES);
     entries.resize(MAX_FILES, None);
     let mut block = [0u8; BLOCK_SIZE];
@@ -411,7 +568,7 @@ fn read_entries(disk: &AtaPioDisk) -> Result<Vec<Option<DirectoryEntry>>, FsErro
     Ok(entries)
 }
 
-fn write_entry(disk: &mut AtaPioDisk, entry: DirectoryEntry) -> Result<(), FsError> {
+fn write_entry(disk: &mut impl BlockDevice, entry: DirectoryEntry) -> Result<(), FsError> {
     let block_index = entry.slot / (BLOCK_SIZE / ENTRY_SIZE);
     let local = entry.slot % (BLOCK_SIZE / ENTRY_SIZE);
     let mut block = [0u8; BLOCK_SIZE];
@@ -433,7 +590,7 @@ fn write_entry(disk: &mut AtaPioDisk, entry: DirectoryEntry) -> Result<(), FsErr
         .map_err(|_| FsError::Io)
 }
 
-fn write_empty_entry(disk: &mut AtaPioDisk, slot: usize) -> Result<(), FsError> {
+fn write_empty_entry(disk: &mut impl BlockDevice, slot: usize) -> Result<(), FsError> {
     let block_index = slot / (BLOCK_SIZE / ENTRY_SIZE);
     let local = slot % (BLOCK_SIZE / ENTRY_SIZE);
     let mut block = [0u8; BLOCK_SIZE];
@@ -445,14 +602,19 @@ fn write_empty_entry(disk: &mut AtaPioDisk, slot: usize) -> Result<(), FsError> 
         .map_err(|_| FsError::Io)
 }
 
-fn read_data(disk: &AtaPioDisk, slot: usize, offset: usize, out: &mut [u8]) -> Result<(), FsError> {
+fn read_data(
+    disk: &mut impl BlockDevice,
+    slot: usize,
+    offset: usize,
+    out: &mut [u8],
+) -> Result<(), FsError> {
     transfer_data(slot, offset, out, |block_index, block| {
         disk.read_block(block_index, block).map_err(|_| FsError::Io)
     })
 }
 
 fn write_data(
-    disk: &mut AtaPioDisk,
+    disk: &mut impl BlockDevice,
     slot: usize,
     offset: usize,
     source: &[u8],
@@ -493,7 +655,7 @@ where
     Ok(())
 }
 
-fn clear_data(disk: &mut AtaPioDisk, slot: usize) -> Result<(), FsError> {
+fn clear_data(disk: &mut impl BlockDevice, slot: usize) -> Result<(), FsError> {
     let block = [0u8; BLOCK_SIZE];
     for file_block in 0..BLOCKS_PER_FILE {
         disk.write_block(data_block(slot, file_block as usize), &block)

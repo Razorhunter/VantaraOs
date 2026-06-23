@@ -668,8 +668,19 @@ Deferred filesystem hardening:
 - [ ] Storage driver path:
   - [x] ATA PIO polling baseline untuk persistence disk.
   - [ ] AHCI/NVMe roadmap
-  - [ ] block cache
-  - [ ] partition parser
+  - [x] block cache
+    - [x] Tambah bounded 16-sector LRU cache di atas `BlockDevice`.
+    - [x] Gunakan write-through policy supaya persistence semantics kekal selamat.
+    - [x] Sambungkan VANTFS metadata dan data I/O kepada cache.
+    - [x] Expose hit/miss/write/eviction counters melalui `/dev/block-cache`.
+    - [x] Tambah unit tests dan QEMU cache-hit regression.
+  - [x] partition parser
+    - [x] Parse dan validate empat primary MBR entries.
+    - [x] Prefer Vantara partition type `0x7f`, fallback kepada first valid partition.
+    - [x] Tambah bounded partition block view sebelum cache/VANTFS.
+    - [x] Kekalkan superfloppy compatibility untuk persistence image lama.
+    - [x] Expose active storage range melalui `/dev/partitions`.
+    - [x] Buktikan partition-offset persistence merentas dua boot QEMU.
 - [ ] Network stack roadmap:
   - [ ] NIC driver
   - [ ] Ethernet

@@ -220,4 +220,39 @@ read-only built-ins and writable RAM files.
 - Extend `devfs` beyond `null`, `zero`, and live registry views as character
   and block driver interfaces mature.
 - Add timestamps, link count, ownership, and permission metadata.
-- Add a block cache, allocation bitmap, and crash-consistent metadata updates.
+- Add an allocation bitmap and crash-consistent metadata updates.
+
+## Block Cache
+
+VANTFS now uses a bounded 16-sector LRU cache above the ATA PIO block device.
+Reads populate the cache and repeated reads avoid ATA polling. Writes use a
+write-through policy: the ATA sector is flushed before the cached copy is
+updated, so existing reboot persistence semantics remain unchanged.
+
+Runtime counters are visible through:
+
+```text
+/dev/block-cache
+```
+
+The view reports capacity, read hits, read misses, writes, and evictions.
+Delayed dirty writeback is intentionally deferred until the kernel has an
+explicit sync and shutdown contract.
+
+## Partition Discovery
+
+The persistence path now parses the four primary MBR entries before mounting
+VANTFS. Partition type `0x7f` is preferred for Vantara volumes; otherwise the
+first valid non-empty partition is selected. All partition bounds are checked
+against the ATA addressable range.
+
+The block stack is:
+
+```text
+ATA PIO -> partition block view -> LRU block cache -> VANTFS
+```
+
+Existing raw VANTFS images remain compatible. If sector 0 has no MBR signature,
+the disk is mounted in `superfloppy` mode using the original sector range.
+The active mode, type, start block, and length are visible at
+`/dev/partitions`.

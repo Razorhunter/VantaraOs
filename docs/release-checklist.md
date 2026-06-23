@@ -78,6 +78,18 @@ make service-manager-test
 make device-namespace-test
 ```
 
+- [ ] VANTFS block-cache hit/miss/write test passes:
+
+```bash
+make block-cache-test
+```
+
+- [ ] MBR partition discovery and partition-relative persistence test passes:
+
+```bash
+make partition-test
+```
+
 - [ ] Golden-output command tests pass for `ls`, `cat`, `procs`, and
       `rusthello`:
 

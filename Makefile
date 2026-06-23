@@ -43,7 +43,8 @@ COMMAND_SMOKE_TARGETS := $(addprefix command-smoke-,$(COMMAND_SMOKE_CASES))
 	persist-disk reset-persist \
 	smoke boot-test command-smoke $(COMMAND_SMOKE_TARGETS) \
 	service-manager-test device-namespace-test \
-	filesystem-write-test filesystem-persistence-test preemption-test \
+	filesystem-write-test filesystem-persistence-test block-cache-test partition-test \
+	preemption-test \
 	kernel-thread-preemption-test signal-test terminal-signal-test isolation-test \
 	regression ci \
 	clean kernel-clean userland-clean
@@ -71,6 +72,8 @@ help:
 	@echo "  make command-smoke"
 	@echo "  make filesystem-write-test"
 	@echo "  make filesystem-persistence-test"
+	@echo "  make block-cache-test"
+	@echo "  make partition-test"
 	@echo "  make preemption-test"
 	@echo "  make kernel-thread-preemption-test"
 	@echo "  make signal-test"
@@ -222,6 +225,12 @@ filesystem-write-test: kernel-build
 
 filesystem-persistence-test: kernel-build
 	QEMU="$(QEMU)" bash scripts/qemu-filesystem-persistence.sh
+
+block-cache-test: kernel-build
+	QEMU="$(QEMU)" bash scripts/qemu-block-cache.sh
+
+partition-test: kernel-build
+	QEMU="$(QEMU)" bash scripts/qemu-partition-parser.sh
 
 preemption-test: kernel-build
 	QEMU="$(QEMU)" bash scripts/qemu-preemption.sh
