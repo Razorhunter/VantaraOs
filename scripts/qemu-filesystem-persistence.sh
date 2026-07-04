@@ -2,9 +2,27 @@
 set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-BOOTIMAGE="${ROOT_DIR}/kernel/target/x86_64-vantara_os/debug/bootimage-kernel.bin"
+BOOTIMAGE="${BOOTIMAGE_OVERRIDE:-${ROOT_DIR}/kernel/target/x86_64-vantara_os/debug/bootimage-kernel.bin}"
 QEMU_BIN="${QEMU:-qemu-system-x86_64}"
-DISK_IMAGE="${ROOT_DIR}/target/vantara-persist-test.img"
+DISK_IMAGE="${PERSIST_IMAGE_OVERRIDE:-${ROOT_DIR}/target/vantara-persist-test.img}"
+QEMU_MACHINE="${QEMU_MACHINE:-}"
+PERSIST_BACKEND="${PERSIST_BACKEND:-}"
+STORAGE_POLICY="${STORAGE_POLICY:-}"
+STORAGE_FALLBACK="${STORAGE_FALLBACK:-}"
+PERSIST_BUS="${PERSIST_BUS:-disk}"
+MACHINE_ARGS=()
+PERSIST_DRIVE_ARGS=()
+if [[ -n "${QEMU_MACHINE}" ]]; then
+  MACHINE_ARGS=(-machine "${QEMU_MACHINE}")
+fi
+if [[ "${PERSIST_BUS}" == "nvme" ]]; then
+  PERSIST_DRIVE_ARGS=(
+    -drive "format=raw,file=${DISK_IMAGE},if=none,id=persist0,cache=writeback"
+    -device "nvme,drive=persist0,serial=VANTARAPERSIST"
+  )
+else
+  PERSIST_DRIVE_ARGS=(-drive "format=raw,file=${DISK_IMAGE},index=1,media=disk")
+fi
 
 if ! command -v "${QEMU_BIN}" >/dev/null 2>&1; then
   echo "filesystem persistence test skipped: ${QEMU_BIN} not found" >&2
@@ -79,8 +97,9 @@ boot_and_run() (
   trap cleanup EXIT
 
   "${QEMU_BIN}" \
+    "${MACHINE_ARGS[@]}" \
     -drive "format=raw,file=${BOOTIMAGE},index=0,media=disk" \
-    -drive "format=raw,file=${DISK_IMAGE},index=1,media=disk" \
+    "${PERSIST_DRIVE_ARGS[@]}" \
     -display none \
     -serial "file:${log_file}" \
     -monitor stdio \
@@ -90,6 +109,15 @@ boot_and_run() (
   qemu_pid=$!
 
   wait_for_log "${log_file}" "${qemu_pid}" "${mount_marker}"
+  if [[ -n "${PERSIST_BACKEND}" ]]; then
+    wait_for_log "${log_file}" "${qemu_pid}" "[PERSIST] backend=${PERSIST_BACKEND}"
+  fi
+  if [[ -n "${STORAGE_POLICY}" ]]; then
+    wait_for_log "${log_file}" "${qemu_pid}" "[STORAGE] policy=${STORAGE_POLICY}"
+  fi
+  if [[ -n "${STORAGE_FALLBACK}" ]]; then
+    wait_for_log "${log_file}" "${qemu_pid}" "fallback=${STORAGE_FALLBACK}"
+  fi
   wait_for_log "${log_file}" "${qemu_pid}" "login: "
   send_text 3 "root"
   wait_for_log "${log_file}" "${qemu_pid}" 'root:/$ '
@@ -122,5 +150,5 @@ boot_and_run first \
   "write /persist/docs/hello forever" "[FD] pid="
 boot_and_run second "cat /persist/docs/hello" "forever" "mounted existing VANTFS01 volume"
 
-echo "filesystem persistence test passed: data survived two QEMU boots"
+echo "filesystem persistence test passed: backend=${PERSIST_BACKEND:-default} data survived two QEMU boots"
 echo "disk image: ${DISK_IMAGE}"

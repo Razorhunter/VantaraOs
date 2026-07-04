@@ -9,6 +9,7 @@ const NET_INODE: u64 = 6;
 const BLOCK_CACHE_INODE: u64 = 7;
 const PARTITIONS_INODE: u64 = 8;
 const AHCI_INODE: u64 = 9;
+const NVME_INODE: u64 = 10;
 const SNAPSHOT_SIZE: usize = 2048;
 
 pub struct DeviceFilesystem;
@@ -25,7 +26,7 @@ impl DeviceFilesystem {
             "mounted at /dev",
         );
         crate::serial_println!(
-            "[DEVFS] ready: nodes=null,zero,drivers,pci,net,block-cache,partitions,ahci"
+            "[DEVFS] ready: nodes=null,zero,drivers,pci,net,block-cache,partitions,ahci,nvme"
         );
     }
 }
@@ -49,6 +50,7 @@ impl FilesystemBackend for DeviceFilesystem {
             "block-cache",
             "partitions",
             "ahci",
+            "nvme",
         ] {
             written = append_line(out, written, name.as_bytes())?;
         }
@@ -57,7 +59,7 @@ impl FilesystemBackend for DeviceFilesystem {
 
     fn stat(&self, path: &str) -> Result<BackendStat, FsError> {
         let (file_type, size, readonly, inode) = match path {
-            "/" => (FileType::Directory, 8, true, ROOT_INODE),
+            "/" => (FileType::Directory, 9, true, ROOT_INODE),
             "/null" => (FileType::File, 0, false, NULL_INODE),
             "/zero" => (FileType::File, 0, false, ZERO_INODE),
             "/drivers" => (
@@ -96,6 +98,12 @@ impl FilesystemBackend for DeviceFilesystem {
                 true,
                 AHCI_INODE,
             ),
+            "/nvme" => (
+                FileType::File,
+                snapshot_len(crate::drivers::nvme::write_to_buffer),
+                true,
+                NVME_INODE,
+            ),
             _ => return Err(FsError::NotFound),
         };
         Ok(BackendStat {
@@ -129,6 +137,7 @@ impl FilesystemBackend for DeviceFilesystem {
                 super::persistent::write_partition_info_to_buffer,
             ),
             AHCI_INODE => read_snapshot(offset, out, crate::drivers::ahci::write_to_buffer),
+            NVME_INODE => read_snapshot(offset, out, crate::drivers::nvme::write_to_buffer),
             ROOT_INODE => Err(FsError::IsDirectory),
             _ => Err(FsError::NotFound),
         }
@@ -138,7 +147,7 @@ impl FilesystemBackend for DeviceFilesystem {
         match inode {
             NULL_INODE | ZERO_INODE => Ok(source.len()),
             DRIVERS_INODE | PCI_INODE | NET_INODE | BLOCK_CACHE_INODE | PARTITIONS_INODE
-            | AHCI_INODE => Err(FsError::ReadOnly),
+            | AHCI_INODE | NVME_INODE => Err(FsError::ReadOnly),
             ROOT_INODE => Err(FsError::IsDirectory),
             _ => Err(FsError::NotFound),
         }
@@ -191,11 +200,11 @@ mod tests {
     #[test_case]
     fn lists_stable_device_nodes() {
         let devfs = DeviceFilesystem::new();
-        let mut out = [0u8; 64];
+        let mut out = [0u8; 80];
         let len = devfs.list("/", &mut out).unwrap();
         assert_eq!(
             &out[..len],
-            b"null\nzero\ndrivers\npci\nnet\nblock-cache\npartitions\nahci\n"
+            b"null\nzero\ndrivers\npci\nnet\nblock-cache\npartitions\nahci\nnvme\n"
         );
     }
 

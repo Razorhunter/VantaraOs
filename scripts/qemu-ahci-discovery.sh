@@ -60,7 +60,22 @@ if grep -Fq "[AHCI] no controller detected" "${LOG_FILE}"; then
   exit 1
 fi
 wait_for_log "abar=0x"
-wait_for_log "mmio_ready=false"
+wait_for_log "mmio_ready=true"
+wait_for_log "cap=0x"
+wait_for_log "pi=0x"
+wait_for_log "vs=0x"
+wait_for_log "active=true"
+wait_for_log "rebased=true"
+wait_for_log "clb=0x"
+wait_for_log "fb=0x"
+wait_for_log "ctba=0x"
+wait_for_log "identify=true"
+wait_for_log "model=QEMU HARDDISK"
+wait_for_log "read_lba0=true"
+wait_for_log "boot_sig=55aa"
+wait_for_log "[AHCI-BLOCK] ready blocks="
+wait_for_log "writable=true"
+wait_for_log "flush=true"
 
 if grep -Fq "KERNEL PANIC" "${LOG_FILE}"; then
   echo "AHCI discovery test failed: kernel panic detected" >&2
@@ -71,5 +86,5 @@ kill "${QEMU_PID}" >/dev/null 2>&1 || true
 wait "${QEMU_PID}" >/dev/null 2>&1 || true
 QEMU_PID=""
 
-echo "AHCI discovery test passed: q35 PCI controller and ABAR detected"
+echo "AHCI BlockDevice test passed: synchronized DMA backend returned LBA 0 signature 55aa"
 echo "serial log: ${LOG_FILE}"

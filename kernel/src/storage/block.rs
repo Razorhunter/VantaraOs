@@ -129,6 +129,11 @@ impl<D: BlockDevice, const ENTRIES: usize> BlockDevice for CachedBlockDevice<D, 
         buffer: &mut [u8; BLOCK_SIZE],
     ) -> Result<(), BlockError> {
         if block_index >= self.block_count() {
+            crate::serial_println!(
+                "[BLOCKCACHE-IO] read out-of-range lba={} blocks={}",
+                block_index,
+                self.block_count()
+            );
             return Err(BlockError::OutOfRange);
         }
         if let Some(index) = self.hit_index(block_index) {

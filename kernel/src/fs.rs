@@ -201,6 +201,11 @@ pub fn init() {
     );
 }
 
+#[cfg(feature = "ahci-vantfs-test")]
+pub fn run_ahci_vantfs_test() {
+    persistent::run_ahci_backend_test();
+}
+
 pub fn list_to_buffer(cwd: &str, path: &str, out: &mut [u8]) -> Result<usize, FsError> {
     let normalized = normalize_path_from(cwd, path)?;
     let resolved = VFS.resolve(normalized.as_str())?;

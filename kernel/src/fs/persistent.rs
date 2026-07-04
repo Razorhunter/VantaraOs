@@ -2,12 +2,42 @@ use alloc::vec::Vec;
 use core::sync::atomic::{AtomicBool, Ordering};
 
 use super::{BackendStat, FileType, FilesystemBackend, FsError, append_line};
+#[cfg(any(
+    feature = "storage-auto",
+    not(any(
+        feature = "storage-ahci",
+        feature = "storage-auto",
+        feature = "storage-nvme"
+    ))
+))]
 use crate::storage::ata::AtaPioDisk;
 use crate::storage::block::{BLOCK_SIZE, BlockDevice, CachedBlockDevice};
 use crate::storage::partition::{
     PartitionBlockDevice, PartitionError, parse_mbr, select_vantara_partition,
 };
 use crate::sync::PreemptMutex;
+
+#[cfg(any(
+    feature = "ahci-vantfs-test",
+    feature = "storage-ahci",
+    feature = "storage-auto"
+))]
+use crate::drivers::ahci::AhciBlockDevice;
+#[cfg(any(feature = "storage-auto", feature = "storage-nvme"))]
+use crate::drivers::nvme::NvmeBlockDevice;
+
+#[cfg(all(feature = "storage-ahci", feature = "storage-auto"))]
+compile_error!("storage-ahci and storage-auto are mutually exclusive");
+#[cfg(all(feature = "storage-ata", feature = "storage-auto"))]
+compile_error!("storage-ata and storage-auto are mutually exclusive");
+#[cfg(all(feature = "storage-ata", feature = "storage-ahci"))]
+compile_error!("storage-ata and storage-ahci are mutually exclusive");
+#[cfg(all(feature = "storage-nvme", feature = "storage-auto"))]
+compile_error!("storage-nvme and storage-auto are mutually exclusive");
+#[cfg(all(feature = "storage-nvme", feature = "storage-ahci"))]
+compile_error!("storage-nvme and storage-ahci are mutually exclusive");
+#[cfg(all(feature = "storage-nvme", feature = "storage-ata"))]
+compile_error!("storage-nvme and storage-ata are mutually exclusive");
 
 const VOLUME_BLOCKS: u64 = 2048;
 const ATA_ADDRESSABLE_BLOCKS: u64 = 4096;
@@ -24,12 +54,299 @@ const MAX_FILE_SIZE: usize = BLOCK_SIZE * 2;
 const BLOCKS_PER_FILE: u64 = 2;
 const CACHE_ENTRIES: usize = 16;
 
-type PersistentPartition = PartitionBlockDevice<AtaPioDisk>;
+const fn persistent_policy() -> &'static str {
+    if cfg!(feature = "storage-auto") {
+        "auto"
+    } else if cfg!(feature = "storage-nvme") {
+        "nvme"
+    } else if cfg!(feature = "storage-ahci") {
+        "ahci"
+    } else {
+        "ata"
+    }
+}
+
+fn persistent_driver_name(backend: &str) -> &'static str {
+    match backend {
+        "nvme" => "nvme-persist",
+        "ahci" => "ahci-persist",
+        _ => "ata-persist",
+    }
+}
+
+#[derive(Clone, Copy)]
+struct StorageSelection {
+    policy: &'static str,
+    preferred: &'static str,
+    backend: &'static str,
+    fallback: bool,
+}
+
+enum PersistentDevice {
+    #[cfg(not(any(
+        feature = "storage-ahci",
+        feature = "storage-auto",
+        feature = "storage-nvme"
+    )))]
+    Ata(AtaPioDisk),
+    #[cfg(feature = "storage-nvme")]
+    Nvme(Option<NvmeBlockDevice>),
+    #[cfg(feature = "storage-ahci")]
+    Ahci(Option<AhciBlockDevice>),
+    #[cfg(feature = "storage-auto")]
+    Auto {
+        ata: AtaPioDisk,
+        ahci: Option<AhciBlockDevice>,
+        nvme: Option<NvmeBlockDevice>,
+    },
+}
+
+impl PersistentDevice {
+    const fn selected() -> Self {
+        #[cfg(feature = "storage-auto")]
+        {
+            Self::Auto {
+                ata: AtaPioDisk::primary_slave(ATA_ADDRESSABLE_BLOCKS),
+                ahci: None,
+                nvme: None,
+            }
+        }
+        #[cfg(feature = "storage-nvme")]
+        {
+            Self::Nvme(None)
+        }
+        #[cfg(feature = "storage-ahci")]
+        {
+            Self::Ahci(None)
+        }
+        #[cfg(not(any(
+            feature = "storage-ahci",
+            feature = "storage-auto",
+            feature = "storage-nvme"
+        )))]
+        {
+            Self::Ata(AtaPioDisk::primary_slave(ATA_ADDRESSABLE_BLOCKS))
+        }
+    }
+
+    fn probe(&mut self) -> Result<StorageSelection, crate::storage::block::BlockError> {
+        match self {
+            #[cfg(not(any(
+                feature = "storage-ahci",
+                feature = "storage-auto",
+                feature = "storage-nvme"
+            )))]
+            Self::Ata(disk) => {
+                disk.probe()?;
+                Ok(StorageSelection {
+                    policy: "ata",
+                    preferred: "ata-pio",
+                    backend: "ata-pio",
+                    fallback: false,
+                })
+            }
+            #[cfg(feature = "storage-nvme")]
+            Self::Nvme(slot) => {
+                *slot = Some(NvmeBlockDevice::primary()?);
+                Ok(StorageSelection {
+                    policy: "nvme",
+                    preferred: "nvme",
+                    backend: "nvme",
+                    fallback: false,
+                })
+            }
+            #[cfg(feature = "storage-ahci")]
+            Self::Ahci(slot) => {
+                *slot = Some(AhciBlockDevice::nth(1)?);
+                Ok(StorageSelection {
+                    policy: "ahci",
+                    preferred: "ahci",
+                    backend: "ahci",
+                    fallback: false,
+                })
+            }
+            #[cfg(feature = "storage-auto")]
+            Self::Auto { ata, ahci, nvme } => {
+                if let Ok(disk) = NvmeBlockDevice::primary() {
+                    *nvme = Some(disk);
+                    return Ok(StorageSelection {
+                        policy: "auto",
+                        preferred: "nvme",
+                        backend: "nvme",
+                        fallback: false,
+                    });
+                }
+                if let Ok(disk) = AhciBlockDevice::nth(1) {
+                    *ahci = Some(disk);
+                    return Ok(StorageSelection {
+                        policy: "auto",
+                        preferred: "nvme",
+                        backend: "ahci",
+                        fallback: true,
+                    });
+                }
+                ata.probe()?;
+                Ok(StorageSelection {
+                    policy: "auto",
+                    preferred: "nvme",
+                    backend: "ata-pio",
+                    fallback: true,
+                })
+            }
+        }
+    }
+
+    fn backend_name(&self) -> &'static str {
+        match self {
+            #[cfg(not(any(
+                feature = "storage-ahci",
+                feature = "storage-auto",
+                feature = "storage-nvme"
+            )))]
+            Self::Ata(_) => "ata-pio",
+            #[cfg(feature = "storage-nvme")]
+            Self::Nvme(_) => "nvme",
+            #[cfg(feature = "storage-ahci")]
+            Self::Ahci(_) => "ahci",
+            #[cfg(feature = "storage-auto")]
+            Self::Auto { nvme: Some(_), .. } => "nvme",
+            #[cfg(feature = "storage-auto")]
+            Self::Auto {
+                nvme: None,
+                ahci: Some(_),
+                ..
+            } => "ahci",
+            #[cfg(feature = "storage-auto")]
+            Self::Auto {
+                nvme: None,
+                ahci: None,
+                ..
+            } => "ata-pio",
+        }
+    }
+}
+
+impl BlockDevice for PersistentDevice {
+    fn block_count(&self) -> u64 {
+        match self {
+            #[cfg(not(any(
+                feature = "storage-ahci",
+                feature = "storage-auto",
+                feature = "storage-nvme"
+            )))]
+            Self::Ata(disk) => disk.block_count(),
+            #[cfg(feature = "storage-nvme")]
+            Self::Nvme(Some(disk)) => disk.block_count(),
+            #[cfg(feature = "storage-nvme")]
+            Self::Nvme(None) => 0,
+            #[cfg(feature = "storage-ahci")]
+            Self::Ahci(Some(disk)) => disk.block_count(),
+            #[cfg(feature = "storage-ahci")]
+            Self::Ahci(None) => 0,
+            #[cfg(feature = "storage-auto")]
+            Self::Auto {
+                nvme: Some(disk), ..
+            } => disk.block_count(),
+            #[cfg(feature = "storage-auto")]
+            Self::Auto {
+                nvme: None,
+                ahci: Some(disk),
+                ..
+            } => disk.block_count(),
+            #[cfg(feature = "storage-auto")]
+            Self::Auto {
+                ata,
+                nvme: None,
+                ahci: None,
+            } => ata.block_count(),
+        }
+    }
+
+    fn read_block(
+        &mut self,
+        block_index: u64,
+        buffer: &mut [u8; BLOCK_SIZE],
+    ) -> Result<(), crate::storage::block::BlockError> {
+        match self {
+            #[cfg(not(any(
+                feature = "storage-ahci",
+                feature = "storage-auto",
+                feature = "storage-nvme"
+            )))]
+            Self::Ata(disk) => disk.read_block(block_index, buffer),
+            #[cfg(feature = "storage-nvme")]
+            Self::Nvme(Some(disk)) => disk.read_block(block_index, buffer),
+            #[cfg(feature = "storage-nvme")]
+            Self::Nvme(None) => Err(crate::storage::block::BlockError::NoDevice),
+            #[cfg(feature = "storage-ahci")]
+            Self::Ahci(Some(disk)) => disk.read_block(block_index, buffer),
+            #[cfg(feature = "storage-ahci")]
+            Self::Ahci(None) => Err(crate::storage::block::BlockError::NoDevice),
+            #[cfg(feature = "storage-auto")]
+            Self::Auto {
+                nvme: Some(disk), ..
+            } => disk.read_block(block_index, buffer),
+            #[cfg(feature = "storage-auto")]
+            Self::Auto {
+                nvme: None,
+                ahci: Some(disk),
+                ..
+            } => disk.read_block(block_index, buffer),
+            #[cfg(feature = "storage-auto")]
+            Self::Auto {
+                ata,
+                nvme: None,
+                ahci: None,
+            } => ata.read_block(block_index, buffer),
+        }
+    }
+
+    fn write_block(
+        &mut self,
+        block_index: u64,
+        buffer: &[u8; BLOCK_SIZE],
+    ) -> Result<(), crate::storage::block::BlockError> {
+        match self {
+            #[cfg(not(any(
+                feature = "storage-ahci",
+                feature = "storage-auto",
+                feature = "storage-nvme"
+            )))]
+            Self::Ata(disk) => disk.write_block(block_index, buffer),
+            #[cfg(feature = "storage-nvme")]
+            Self::Nvme(Some(disk)) => disk.write_block(block_index, buffer),
+            #[cfg(feature = "storage-nvme")]
+            Self::Nvme(None) => Err(crate::storage::block::BlockError::NoDevice),
+            #[cfg(feature = "storage-ahci")]
+            Self::Ahci(Some(disk)) => disk.write_block(block_index, buffer),
+            #[cfg(feature = "storage-ahci")]
+            Self::Ahci(None) => Err(crate::storage::block::BlockError::NoDevice),
+            #[cfg(feature = "storage-auto")]
+            Self::Auto {
+                nvme: Some(disk), ..
+            } => disk.write_block(block_index, buffer),
+            #[cfg(feature = "storage-auto")]
+            Self::Auto {
+                nvme: None,
+                ahci: Some(disk),
+                ..
+            } => disk.write_block(block_index, buffer),
+            #[cfg(feature = "storage-auto")]
+            Self::Auto {
+                ata,
+                nvme: None,
+                ahci: None,
+            } => ata.write_block(block_index, buffer),
+        }
+    }
+}
+
+type PersistentPartition = PartitionBlockDevice<PersistentDevice>;
 type PersistentDisk = CachedBlockDevice<PersistentPartition, CACHE_ENTRIES>;
 
 static DISK: PreemptMutex<PersistentDisk> =
     PreemptMutex::new(PersistentDisk::new(PersistentPartition::new(
-        AtaPioDisk::primary_slave(ATA_ADDRESSABLE_BLOCKS),
+        PersistentDevice::selected(),
         ATA_ADDRESSABLE_BLOCKS,
         VOLUME_BLOCKS,
     )));
@@ -48,7 +365,7 @@ impl PersistentFilesystem {
     pub fn init(&self) {
         let result = self.initialize_disk();
         match result {
-            Ok(formatted) => {
+            Ok((formatted, selection)) => {
                 self.available.store(true, Ordering::Release);
                 let detail = if formatted {
                     "formatted new VANTFS01 volume"
@@ -56,7 +373,7 @@ impl PersistentFilesystem {
                     "mounted existing VANTFS01 volume"
                 };
                 crate::drivers::status::report(
-                    "ata-persist",
+                    persistent_driver_name(selection.backend),
                     crate::drivers::status::DriverState::Ready,
                     detail,
                 );
@@ -65,7 +382,13 @@ impl PersistentFilesystem {
                     crate::drivers::status::DriverState::Ready,
                     "16-sector LRU write-through",
                 );
-                crate::serial_println!("[PERSIST] {}", detail);
+                crate::serial_println!(
+                    "[PERSIST] backend={} policy={} fallback={} {}",
+                    selection.backend,
+                    selection.policy,
+                    selection.fallback,
+                    detail
+                );
                 crate::serial_println!(
                     "[BLOCKCACHE] ready capacity={} policy=write-through",
                     CACHE_ENTRIES
@@ -74,11 +397,15 @@ impl PersistentFilesystem {
             Err(error) => {
                 self.available.store(false, Ordering::Release);
                 crate::drivers::status::report(
-                    "ata-persist",
+                    "storage-persist",
                     crate::drivers::status::DriverState::Missing,
-                    "dedicated IDE persistence disk unavailable",
+                    "selected persistence disk unavailable",
                 );
-                crate::serial_println!("[PERSIST] unavailable: {:?}", error);
+                crate::serial_println!(
+                    "[PERSIST] policy={} unavailable: {:?}",
+                    persistent_policy(),
+                    error
+                );
             }
         }
     }
@@ -87,19 +414,30 @@ impl PersistentFilesystem {
         self.available.load(Ordering::Acquire)
     }
 
-    fn initialize_disk(&self) -> Result<bool, FsError> {
+    fn initialize_disk(&self) -> Result<(bool, StorageSelection), FsError> {
         let mut disk = DISK.lock();
         let partition = disk.backing_mut();
-        partition
-            .device()
+        let selection = partition
+            .device_mut()
             .probe()
+            .map_err(|_| FsError::Unavailable)?;
+        crate::serial_println!(
+            "[STORAGE] policy={} preferred={} selected={} fallback={}",
+            selection.policy,
+            selection.preferred,
+            selection.backend,
+            selection.fallback
+        );
+        let physical_blocks = partition.device().block_count();
+        partition
+            .reset_geometry(physical_blocks, VOLUME_BLOCKS)
             .map_err(|_| FsError::Unavailable)?;
         let mut mbr = [0u8; BLOCK_SIZE];
         partition
             .device_mut()
             .read_block(0, &mut mbr)
             .map_err(|_| FsError::Io)?;
-        match parse_mbr(&mbr, ATA_ADDRESSABLE_BLOCKS) {
+        match parse_mbr(&mbr, physical_blocks) {
             Ok(partitions) => {
                 let selected = select_vantara_partition(&partitions).ok_or(FsError::Unavailable)?;
                 if selected.block_count < VOLUME_BLOCKS {
@@ -136,10 +474,10 @@ impl PersistentFilesystem {
             if read_u32(&header, 8) != VERSION {
                 return Err(FsError::Corrupt);
             }
-            return Ok(false);
+            return Ok((false, selection));
         }
         format_volume(&mut *disk)?;
-        Ok(true)
+        Ok((true, selection))
     }
 
     fn ensure_available(&self) -> Result<(), FsError> {
@@ -151,7 +489,9 @@ pub(super) fn write_partition_info_to_buffer(out: &mut [u8]) -> usize {
     let disk = DISK.lock();
     let partition = disk.backing();
     let mut writer = CacheStatsWriter::new(out);
-    writer.write_str("VANTFS storage view\nmode ");
+    writer.write_str("VANTFS storage view\nbackend ");
+    writer.write_str(partition.device().backend_name());
+    writer.write_str("\nmode ");
     writer.write_str(if partition.partitioned() {
         "mbr"
     } else {
@@ -533,8 +873,14 @@ fn read_entries(disk: &mut impl BlockDevice) -> Result<Vec<Option<DirectoryEntry
     entries.resize(MAX_FILES, None);
     let mut block = [0u8; BLOCK_SIZE];
     for block_index in 0..DIRECTORY_BLOCKS {
-        disk.read_block(DIRECTORY_START_BLOCK + block_index, &mut block)
-            .map_err(|_| FsError::Io)?;
+        if let Err(error) = disk.read_block(DIRECTORY_START_BLOCK + block_index, &mut block) {
+            crate::serial_println!(
+                "[PERSIST-READ] directory block={} error={:?}",
+                DIRECTORY_START_BLOCK + block_index,
+                error
+            );
+            return Err(FsError::Io);
+        }
         for local in 0..BLOCK_SIZE / ENTRY_SIZE {
             let slot = block_index as usize * (BLOCK_SIZE / ENTRY_SIZE) + local;
             let start = local * ENTRY_SIZE;
@@ -543,6 +889,11 @@ fn read_entries(disk: &mut impl BlockDevice) -> Result<Vec<Option<DirectoryEntry
             }
             let name_len = block[start + 1] as usize;
             if name_len == 0 || name_len > MAX_NAME_LEN {
+                crate::serial_println!(
+                    "[PERSIST-READ] corrupt slot={} name_len={}",
+                    slot,
+                    name_len
+                );
                 return Err(FsError::Corrupt);
             }
             let mut name = [0u8; MAX_NAME_LEN];
@@ -558,7 +909,14 @@ fn read_entries(disk: &mut impl BlockDevice) -> Result<Vec<Option<DirectoryEntry
                 file_type: match block[start + 2] {
                     0 | 1 => FileType::File,
                     2 => FileType::Directory,
-                    _ => return Err(FsError::Corrupt),
+                    value => {
+                        crate::serial_println!(
+                            "[PERSIST-READ] corrupt slot={} file_type={}",
+                            slot,
+                            value
+                        );
+                        return Err(FsError::Corrupt);
+                    }
                 },
                 name,
                 name_len,
@@ -666,6 +1024,107 @@ fn clear_data(disk: &mut impl BlockDevice, slot: usize) -> Result<(), FsError> {
 
 fn data_block(slot: usize, file_block: usize) -> u64 {
     DATA_START_BLOCK + slot as u64 * BLOCKS_PER_FILE + file_block as u64
+}
+
+#[cfg(feature = "ahci-vantfs-test")]
+pub(super) fn run_ahci_backend_test() {
+    const TEST_NAME: &[u8] = b"ahci-note";
+    const TEST_PAYLOAD: &[u8] = b"persistent through ahci vantfs";
+    let result = (|| {
+        let mut raw = AhciBlockDevice::primary().map_err(|_| FsError::Unavailable)?;
+        let physical_blocks = raw.block_count();
+        if physical_blocks <= VOLUME_BLOCKS {
+            return Err(FsError::Unavailable);
+        }
+        let mut mbr = [0u8; BLOCK_SIZE];
+        raw.read_block(0, &mut mbr).map_err(|_| FsError::Io)?;
+        let mut partitions = parse_mbr(&mbr, physical_blocks).map_err(|_| FsError::Corrupt)?;
+        if !partitions
+            .iter()
+            .flatten()
+            .any(|partition| partition.partition_type == 0x7f)
+        {
+            let start = physical_blocks - VOLUME_BLOCKS;
+            let start = u32::try_from(start).map_err(|_| FsError::Unavailable)?;
+            let entry = 446;
+            mbr[entry..entry + 16].fill(0);
+            mbr[entry + 4] = 0x7f;
+            mbr[entry + 8..entry + 12].copy_from_slice(&start.to_le_bytes());
+            mbr[entry + 12..entry + 16].copy_from_slice(&(VOLUME_BLOCKS as u32).to_le_bytes());
+            raw.write_block(0, &mbr).map_err(|_| FsError::Io)?;
+            partitions = parse_mbr(&mbr, physical_blocks).map_err(|_| FsError::Corrupt)?;
+        }
+        let selected = select_vantara_partition(&partitions).ok_or(FsError::Unavailable)?;
+        if selected.partition_type != 0x7f || selected.block_count < VOLUME_BLOCKS {
+            return Err(FsError::Corrupt);
+        }
+
+        let mut partition = PartitionBlockDevice::new(raw, physical_blocks, VOLUME_BLOCKS);
+        partition
+            .configure_partition(selected)
+            .map_err(|_| FsError::Unavailable)?;
+        let mut disk = CachedBlockDevice::<_, CACHE_ENTRIES>::new(partition);
+        let mut header = [0u8; BLOCK_SIZE];
+        disk.read_block(HEADER_BLOCK, &mut header)
+            .map_err(|_| FsError::Io)?;
+        disk.read_block(HEADER_BLOCK, &mut header)
+            .map_err(|_| FsError::Io)?;
+
+        let phase = if &header[..MAGIC.len()] == MAGIC {
+            if read_u32(&header, 8) != VERSION {
+                return Err(FsError::Corrupt);
+            }
+            let entries = read_entries(&mut disk)?;
+            let entry = child(&entries, 1, TEST_NAME).ok_or(FsError::NotFound)?;
+            let mut payload = [0u8; TEST_PAYLOAD.len()];
+            read_data(&mut disk, entry.slot, 0, &mut payload)?;
+            if payload != TEST_PAYLOAD {
+                return Err(FsError::Corrupt);
+            }
+            "verify"
+        } else {
+            format_volume(&mut disk)?;
+            let entries = read_entries(&mut disk)?;
+            if child(&entries, 1, TEST_NAME).is_some() {
+                return Err(FsError::AlreadyExists);
+            }
+            let slot = entries
+                .iter()
+                .position(Option::is_none)
+                .ok_or(FsError::NoSpace)?;
+            clear_data(&mut disk, slot)?;
+            write_data(&mut disk, slot, 0, TEST_PAYLOAD)?;
+            let mut entry = DirectoryEntry::new(slot, 1, TEST_NAME, FileType::File);
+            entry.len = TEST_PAYLOAD.len();
+            write_entry(&mut disk, entry)?;
+            let mut payload = [0u8; TEST_PAYLOAD.len()];
+            read_data(&mut disk, slot, 0, &mut payload)?;
+            if payload != TEST_PAYLOAD {
+                return Err(FsError::Corrupt);
+            }
+            "write"
+        };
+        let stats = disk.stats();
+        Ok((phase, selected, stats))
+    })();
+
+    match result {
+        Ok((phase, partition, stats)) => {
+            crate::serial_println!(
+                "[AHCI-VANTFS-TEST] phase={} type={:#04x} start={} blocks={} cache_hits={} cache_misses={} cache_writes={} payload_ok=true",
+                phase,
+                partition.partition_type,
+                partition.start_block,
+                partition.block_count,
+                stats.read_hits,
+                stats.read_misses,
+                stats.writes
+            );
+        }
+        Err(error) => {
+            crate::serial_println!("[AHCI-VANTFS-TEST] failed error={:?}", error);
+        }
+    }
 }
 
 fn split_parent_name(path: &str) -> Result<(&str, &[u8]), FsError> {

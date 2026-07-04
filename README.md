@@ -95,6 +95,12 @@ make package-test
 make block-cache-test
 make partition-test
 make ahci-test
+make ahci-write-test
+make ahci-vantfs-test
+make ahci-persist-test
+make storage-policy-test
+make nvme-test
+make nvme-write-test
 ```
 
 `kernel-check` performs a compile check for the kernel and integration tests.
@@ -113,7 +119,28 @@ and live driver, PCI, and network registry views.
 operations in QEMU.
 `partition-test` verifies MBR discovery, partition-relative VANTFS I/O, and
 data persistence across reboot.
-`ahci-test` boots QEMU Q35 and verifies PCI AHCI controller and ABAR discovery.
+`ahci-test` boots QEMU Q35, maps ABAR, reads HBA capabilities, verifies a safe
+port rebase, checks that slot-0 `IDENTIFY DEVICE` returns the QEMU disk model,
+and validates a synchronized `BlockDevice` read of LBA 0.
+`ahci-write-test` uses an isolated feature build and copied disk image to prove
+that `WRITE DMA EXT` followed by `FLUSH CACHE EXT` survives a second QEMU boot.
+`ahci-vantfs-test` proves the complete AHCI -> MBR partition -> block cache ->
+VANTFS path on an isolated image across two QEMU boots.
+`ahci-persist-test` enables controlled `storage-ahci` selection and reruns the
+real `/persist` shell lifecycle against a dedicated second Q35 disk.
+`storage-policy-test` proves `storage-auto` prefers NVMe, then falls back to
+AHCI and ATA PIO, with VANTFS persistence across two boots for every branch.
+`storage-auto` is the default kernel policy; strict `storage-ata` and
+`storage-ahci`/`storage-nvme` feature builds remain available for recovery and
+diagnostics.
+`nvme-test` boots an isolated QEMU NVMe device, maps BAR0, takes controller
+ownership, configures private admin queues, and verifies Identify
+Controller/Namespace metadata, private QID 1 I/O queues, and a single-block
+read of NSID 1 LBA 0.
+`nvme-write-test` writes a deterministic sector to the final namespace LBA,
+issues an explicit NVM Flush, verifies immediate readback, and proves the same
+checksum survives a second QEMU boot. The same synchronized queue path is now
+exposed as a bounds-checked `NvmeBlockDevice` with write-through flush semantics.
 See [`docs/storage.md`](docs/storage.md).
 `command-smoke` boots an isolated QEMU guest for each of `ls`, `cat`, `procs`,
 and `rusthello`, then compares its serial output with stable golden snippets.

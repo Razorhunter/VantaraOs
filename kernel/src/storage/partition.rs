@@ -102,6 +102,22 @@ impl<D> PartitionBlockDevice<D> {
         &mut self.device
     }
 
+    pub fn reset_geometry(
+        &mut self,
+        physical_blocks: u64,
+        visible_blocks: u64,
+    ) -> Result<(), PartitionError> {
+        if physical_blocks == 0 || visible_blocks == 0 || visible_blocks > physical_blocks {
+            return Err(PartitionError::OutOfRange);
+        }
+        self.physical_blocks = physical_blocks;
+        self.start_block = 0;
+        self.block_count = visible_blocks;
+        self.partition_type = 0;
+        self.partitioned = false;
+        Ok(())
+    }
+
     pub fn configure_superfloppy(&mut self, block_count: u64) -> Result<(), PartitionError> {
         self.configure(0, block_count, 0, false)
     }
@@ -159,6 +175,13 @@ impl<D: BlockDevice> BlockDevice for PartitionBlockDevice<D> {
         buffer: &mut [u8; BLOCK_SIZE],
     ) -> Result<(), BlockError> {
         if block_index >= self.block_count {
+            crate::serial_println!(
+                "[PARTITION-IO] read out-of-range lba={} start={} blocks={} physical={}",
+                block_index,
+                self.start_block,
+                self.block_count,
+                self.physical_blocks
+            );
             return Err(BlockError::OutOfRange);
         }
         self.device

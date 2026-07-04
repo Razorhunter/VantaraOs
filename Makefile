@@ -44,7 +44,7 @@ COMMAND_SMOKE_TARGETS := $(addprefix command-smoke-,$(COMMAND_SMOKE_CASES))
 	smoke boot-test command-smoke $(COMMAND_SMOKE_TARGETS) \
 	service-manager-test device-namespace-test \
 	filesystem-write-test filesystem-persistence-test block-cache-test partition-test \
-	ahci-test preemption-test \
+	ahci-test ahci-write-test ahci-vantfs-test ahci-persist-test storage-policy-test nvme-test nvme-write-test preemption-test \
 	kernel-thread-preemption-test signal-test terminal-signal-test isolation-test \
 	regression ci \
 	clean kernel-clean userland-clean
@@ -75,6 +75,12 @@ help:
 	@echo "  make block-cache-test"
 	@echo "  make partition-test"
 	@echo "  make ahci-test"
+	@echo "  make ahci-write-test"
+	@echo "  make ahci-vantfs-test"
+	@echo "  make ahci-persist-test"
+	@echo "  make storage-policy-test"
+	@echo "  make nvme-test"
+	@echo "  make nvme-write-test"
 	@echo "  make preemption-test"
 	@echo "  make kernel-thread-preemption-test"
 	@echo "  make signal-test"
@@ -235,6 +241,24 @@ partition-test: kernel-build
 
 ahci-test: kernel-build
 	QEMU="$(QEMU)" bash scripts/qemu-ahci-discovery.sh
+
+ahci-write-test: userland-bin
+	QEMU="$(QEMU)" bash scripts/qemu-ahci-write-persistence.sh
+
+ahci-vantfs-test: userland-bin
+	QEMU="$(QEMU)" bash scripts/qemu-ahci-vantfs-persistence.sh
+
+ahci-persist-test: userland-bin
+	QEMU="$(QEMU)" bash scripts/qemu-ahci-persist-lifecycle.sh
+
+storage-policy-test: userland-bin
+	QEMU="$(QEMU)" bash scripts/qemu-storage-auto-policy.sh
+
+nvme-test: kernel-build
+	QEMU="$(QEMU)" bash scripts/qemu-nvme-discovery.sh
+
+nvme-write-test: userland-bin
+	QEMU="$(QEMU)" bash scripts/qemu-nvme-write-persistence.sh
 
 preemption-test: kernel-build
 	QEMU="$(QEMU)" bash scripts/qemu-preemption.sh

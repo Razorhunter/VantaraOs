@@ -9,7 +9,7 @@ use x86_64::{
     VirtAddr,
     structures::paging::PageTableFlags,
     structures::paging::mapper::{MapToError, UnmapError},
-    structures::paging::{OffsetPageTable, PageTable},
+    structures::paging::{OffsetPageTable, PageSize, PageTable},
 };
 
 /// A FrameAllocator that returns usable frames from the bootloader's memory map.
@@ -166,6 +166,48 @@ pub fn map_range(
     Ok(())
 }
 
+#[derive(Debug)]
+pub enum MmioMapError {
+    InvalidRange,
+    Map(MapToError<Size4KiB>),
+}
+
+pub fn map_mmio_range(
+    physical_start: PhysAddr,
+    virtual_start: VirtAddr,
+    size: u64,
+    mapper: &mut impl Mapper<Size4KiB>,
+    frame_allocator: &mut impl FrameAllocator<Size4KiB>,
+) -> Result<(), MmioMapError> {
+    if size == 0
+        || !physical_start.is_aligned(Size4KiB::SIZE)
+        || !virtual_start.is_aligned(Size4KiB::SIZE)
+    {
+        return Err(MmioMapError::InvalidRange);
+    }
+
+    let page_count = size.div_ceil(Size4KiB::SIZE);
+    let flags = PageTableFlags::PRESENT
+        | PageTableFlags::WRITABLE
+        | PageTableFlags::NO_EXECUTE
+        | PageTableFlags::NO_CACHE
+        | PageTableFlags::WRITE_THROUGH;
+    for index in 0..page_count {
+        let page = Page::containing_address(virtual_start + index * Size4KiB::SIZE);
+        let frame = PhysFrame::containing_address(physical_start + index * Size4KiB::SIZE);
+        // SAFETY: the caller reserves a unique kernel virtual MMIO window and
+        // supplies page-aligned physical device frames. The uncached,
+        // non-executable mapping is writable only for device registers.
+        unsafe {
+            mapper
+                .map_to(page, frame, flags, frame_allocator)
+                .map_err(MmioMapError::Map)?
+                .flush();
+        }
+    }
+    Ok(())
+}
+
 fn pages_for_range(start: VirtAddr, size: u64) -> Option<(Page, Page)> {
     if size == 0 {
         return None;
@@ -260,7 +302,10 @@ pub fn create_demo_vga_mapping(
 #[cfg(test)]
 mod tests {
     use super::pages_for_range;
-    use x86_64::{VirtAddr, structures::paging::Page};
+    use x86_64::{
+        PhysAddr, VirtAddr,
+        structures::paging::{Page, PageSize, Size4KiB},
+    };
 
     #[test_case]
     fn zero_length_range_maps_no_pages() {
@@ -281,5 +326,12 @@ mod tests {
 
         assert_eq!(start, Page::containing_address(VirtAddr::new(0x1000)));
         assert_eq!(end, Page::containing_address(VirtAddr::new(0x2000)));
+    }
+
+    #[test_case]
+    fn mmio_alignment_uses_page_boundaries() {
+        assert!(PhysAddr::new(0x1000).is_aligned(Size4KiB::SIZE));
+        assert!(VirtAddr::new(0xffff_9000_0000_0000).is_aligned(Size4KiB::SIZE));
+        assert!(!PhysAddr::new(0x1001).is_aligned(Size4KiB::SIZE));
     }
 }

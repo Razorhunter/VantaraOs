@@ -2,6 +2,7 @@ pub mod ahci;
 pub mod keyboard;
 pub mod mouse;
 pub mod network;
+pub mod nvme;
 pub mod pci;
 pub mod ps2;
 pub mod status;

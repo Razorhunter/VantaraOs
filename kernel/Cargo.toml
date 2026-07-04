@@ -8,7 +8,15 @@ description = "Vantara System OS Kernel"
 license = "Apache-2.0 license"
 
 [features]
+default = ["storage-auto"]
+ahci-vantfs-test = []
+ahci-write-test = []
+nvme-write-test = []
 kernel-thread-preemption-test = []
+storage-ahci = []
+storage-auto = []
+storage-ata = []
+storage-nvme = []
 
 [dependencies]
 bootloader = { version = "0.9.23", features = ["map_physical_memory"] }

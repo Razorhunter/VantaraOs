@@ -512,7 +512,7 @@ kepada platform OS yang boleh dibandingkan dengan kernel mainstream secara berpe
 - [x] Tambah regression suite untuk process, memory, syscall, filesystem, dan boot.
 - [x] Audit unsafe Rust blocks dengan safety notes.
 
-### Phase B: Real Multitasking Platform
+### Phase B: Real Multitasking Platform [COMPLETE]
 
 - [x] Preemptive scheduler untuk user process.
   - [x] Custom PIT entry yang simpan full Ring-3 register/interrupt frame.
@@ -672,10 +672,39 @@ Deferred filesystem hardening:
     - [x] Decode 32-bit/64-bit PCI BAR dan validate ABAR5 memory BAR.
     - [x] Tambah AHCI controller registry dan `/dev/ahci`.
     - [x] Tambah Q35 QEMU discovery regression.
-    - [ ] Tambah audited PCI MMIO mapper untuk ABAR.
-    - [ ] Parse HBA capabilities/version/implemented ports.
-    - [ ] Implement AHCI command list/FIS/PRDT dan DMA I/O.
-    - [ ] Tambah NVMe PCI discovery dan queue roadmap.
+    - [x] Tambah audited PCI MMIO mapper untuk ABAR.
+    - [x] Map ABAR uncached, write-through, writable, dan non-executable.
+    - [x] Parse HBA capabilities/version/implemented ports.
+    - [x] Expose CAP/PI/VS melalui `/dev/ahci`.
+    - [x] Allocate page-aligned command-list, received-FIS, command-table, dan data frames.
+    - [x] Stop/rebase/start first active SATA port dengan PxCMD timeout guards.
+    - [x] Initialize slot-0 command header dan one-entry 512-byte PRDT.
+    - [x] Implement polled AHCI IDENTIFY DEVICE dan parse model disk.
+    - [x] Implement dan validate single-sector AHCI `READ DMA EXT`.
+    - [x] Expose synchronized read-only AHCI `BlockDevice` dengan capacity daripada IDENTIFY.
+    - [x] Implement AHCI `WRITE DMA EXT` dan `FLUSH CACHE EXT` dalam `BlockDevice`.
+    - [x] Buktikan AHCI write + flush persistence merentas dua boot QEMU pada image terasing.
+    - [x] Buktikan MBR -> cache -> VANTFS melalui AHCI merentas dua boot QEMU.
+    - [x] Tambah controlled strict `storage-ahci` backend selection.
+    - [x] Jalankan `/persist` shell lifecycle melalui AHCI disk kedua merentas dua boot.
+    - [x] Tambah `storage-auto`: prefer AHCI disk kedua, fallback ATA PIO dengan diagnostics.
+    - [x] Buktikan preferred-AHCI dan fallback-ATA masing-masing persist merentas dua boot.
+    - [x] Promote tested `storage-auto` policy sebagai default persistence selection.
+    - [x] Kekalkan strict `storage-ata` dan `storage-ahci` recovery builds.
+    - [x] Detect PCI NVMe class `01/08/02` dan decode BAR0.
+    - [x] Map NVMe BAR0 melalui audited uncached MMIO window.
+    - [x] Parse CAP/VS/CC/CSTS, queue limit, doorbell stride, dan page-size range.
+    - [x] Tambah NVMe registry, `/dev/nvme`, dan QEMU discovery regression.
+    - [x] Implement guarded CC.EN/CSTS.RDY controller ownership transition.
+    - [x] Allocate private 64-entry admin SQ/CQ dan program AQA/ASQ/ACQ.
+    - [x] Submit polled NVMe Identify Controller dan parse model/serial/NN.
+    - [x] Submit Identify Namespace NSID 1 dan parse capacity/LBA format.
+    - [x] Request queue resources dan create private 64-entry NVMe I/O CQ/SQ QID 1.
+    - [x] Implement polled NVM single-block read dan validate LBA 0 payload.
+    - [x] Implement NVMe write + flush dan buktikan persistence merentas dua boot QEMU.
+    - [x] Expose synchronized NVMe `BlockDevice` dengan write-through flush semantics.
+    - [x] Tambah NVMe kepada controlled `storage-auto` policy dan buktikan VANTFS persistence.
+    - [x] Kekalkan strict `storage-nvme` recovery/diagnostic build.
   - [x] block cache
     - [x] Tambah bounded 16-sector LRU cache di atas `BlockDevice`.
     - [x] Gunakan write-through policy supaya persistence semantics kekal selamat.
