@@ -110,6 +110,8 @@ wait_for_log "mac_valid=true"
 wait_for_log "rxq=true"
 wait_for_log "txq=true"
 wait_for_log "depth=16"
+wait_for_log "tx_test=true"
+wait_for_log "tx_packets=1"
 wait_for_log "login: "
 send_text "root"
 wait_for_log 'root:/$ '

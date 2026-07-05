@@ -5,7 +5,7 @@ kernel/src/allocator/linked_list.rs	9
 kernel/src/drivers/ahci.rs	6
 kernel/src/drivers/keyboard.rs	1
 kernel/src/drivers/mouse.rs	5
-kernel/src/drivers/network.rs	3
+kernel/src/drivers/network.rs	4
 kernel/src/drivers/nvme.rs	6
 kernel/src/drivers/pci.rs	2
 kernel/src/drivers/ps2.rs	7

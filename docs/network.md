@@ -20,5 +20,10 @@ descriptor a dedicated packet-buffer frame, programs ring base/length/head/tail
 registers, and enables receive/transmit engines with interrupts masked for the
 current polling foundation.
 
-Submitting and reclaiming the first Ethernet frame is the next NIC milestone;
-Ethernet parsing, ARP, IPv4, UDP, and TCP remain pending.
+The boot-time TX regression builds a minimum 60-byte broadcast Ethernet frame,
+uses the NIC MAC as source, assigns experimental EtherType `0x88b5`, and writes
+the `VANTARA_TX_V1` marker. It advances `TDT`, polls descriptor-done, reclaims
+the slot, and exposes `tx_test=1` plus `tx_packets=1` through `/Devices/net`.
+
+Polling, validating, and recycling received descriptors is the next NIC
+milestone; Ethernet parsing, ARP, IPv4, UDP, and TCP remain pending.

@@ -727,7 +727,8 @@ Deferred filesystem hardening:
     - [x] Read CTRL/STATUS, link state, dan valid receive MAC address.
     - [x] Expose mapped NIC diagnostics melalui `/Devices/net` dan QEMU regression.
     - [x] Initialize 16-entry RX/TX descriptor rings dan dedicated packet buffers.
-    - [ ] Submit dan reclaim Ethernet frame pertama melalui TX ring.
+    - [x] Submit dan reclaim Ethernet frame pertama melalui TX ring.
+    - [ ] Poll, validate, dan recycle received Ethernet descriptors.
   - [ ] Ethernet
   - [ ] ARP
   - [ ] IPv4

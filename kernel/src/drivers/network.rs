@@ -1,5 +1,6 @@
 use crate::sync::PreemptMutex as Mutex;
 use alloc::vec::Vec;
+use core::sync::atomic::{Ordering, fence};
 use lazy_static::lazy_static;
 use x86_64::{
     PhysAddr, VirtAddr,
@@ -42,6 +43,10 @@ const RECEIVE_STRIP_CRC: u32 = 1 << 26;
 const TRANSMIT_ENABLE: u32 = 1 << 1;
 const TRANSMIT_PAD_SHORT_PACKETS: u32 = 1 << 3;
 const DMA_RING_DEPTH: usize = 16;
+const ETHERNET_MIN_FRAME_SIZE: usize = 60;
+const TRANSMIT_COMMAND_EOP_IFCS_RS: u8 = (1 << 0) | (1 << 1) | (1 << 3);
+const DESCRIPTOR_DONE: u8 = 1;
+const TRANSMIT_POLL_LIMIT: usize = 2_000_000;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum NetworkKind {
@@ -71,6 +76,8 @@ pub struct NetworkDevice {
     pub rx_queue_ready: bool,
     pub tx_queue_ready: bool,
     pub queue_depth: u16,
+    pub tx_test_ok: bool,
+    pub tx_packets: u64,
     queues: Option<E1000Queues>,
 }
 
@@ -80,6 +87,7 @@ struct E1000Queues {
     transmit_ring: u64,
     receive_buffers: [u64; DMA_RING_DEPTH],
     transmit_buffers: [u64; DMA_RING_DEPTH],
+    transmit_next: u16,
 }
 
 #[repr(C)]
@@ -177,6 +185,8 @@ pub fn init(
                 rx_queue_ready: false,
                 tx_queue_ready: false,
                 queue_depth: 0,
+                tx_test_ok: false,
+                tx_packets: 0,
                 queues: None,
                 pci: device,
             }
@@ -220,12 +230,16 @@ pub fn init(
             device.mac_valid = address_high & RECEIVE_ADDRESS_VALID != 0
                 && device.mac.iter().any(|byte| *byte != 0);
             pci::enable_memory_and_bus_master(device.pci);
-            if let Some(queues) =
+            if let Some(mut queues) =
                 initialize_dma_queues(registers, frame_allocator, physical_memory_offset)
             {
                 device.rx_queue_ready = true;
                 device.tx_queue_ready = true;
                 device.queue_depth = DMA_RING_DEPTH as u16;
+                if submit_test_frame(registers, physical_memory_offset, &mut queues, device.mac) {
+                    device.tx_test_ok = true;
+                    device.tx_packets = 1;
+                }
                 device.queues = Some(queues);
             }
             device.mmio_ready = true;
@@ -241,11 +255,11 @@ pub fn init(
         )
     } else if devices
         .iter()
-        .any(|device| device.rx_queue_ready && device.tx_queue_ready)
+        .any(|device| device.rx_queue_ready && device.tx_queue_ready && device.tx_test_ok)
     {
         (
             crate::drivers::status::DriverState::Degraded,
-            "e1000 RX/TX DMA rings ready; packet API pending",
+            "e1000 DMA rings ready; test Ethernet frame transmitted",
         )
     } else {
         (
@@ -257,7 +271,7 @@ pub fn init(
 
     for device in &devices {
         crate::serial_println!(
-            "[NET] {:02x}:{:02x}.{} vendor={:04x} device={:04x} kind={:?} driver={:?} bar0={:#x} mmio_ready={} ctrl={:#010x} status={:#010x} link_up={} mac={:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x} mac_valid={} rxq={} txq={} depth={}",
+            "[NET] {:02x}:{:02x}.{} vendor={:04x} device={:04x} kind={:?} driver={:?} bar0={:#x} mmio_ready={} ctrl={:#010x} status={:#010x} link_up={} mac={:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x} mac_valid={} rxq={} txq={} depth={} tx_test={} tx_packets={}",
             device.pci.bus,
             device.pci.slot,
             device.pci.function,
@@ -279,7 +293,9 @@ pub fn init(
             device.mac_valid,
             device.rx_queue_ready,
             device.tx_queue_ready,
-            device.queue_depth
+            device.queue_depth,
+            device.tx_test_ok,
+            device.tx_packets
         );
     }
 
@@ -373,7 +389,57 @@ fn initialize_dma_queues(
         transmit_ring,
         receive_buffers,
         transmit_buffers,
+        transmit_next: 0,
     })
+}
+
+fn submit_test_frame(
+    registers: E1000Mmio,
+    physical_memory_offset: VirtAddr,
+    queues: &mut E1000Queues,
+    source_mac: [u8; 6],
+) -> bool {
+    let index = queues.transmit_next as usize;
+    let descriptor_pointer =
+        (physical_memory_offset + queues.transmit_ring).as_mut_ptr::<TransmitDescriptor>();
+    let buffer_pointer =
+        (physical_memory_offset + queues.transmit_buffers[index]).as_mut_ptr::<u8>();
+    let mut frame = [0u8; ETHERNET_MIN_FRAME_SIZE];
+    frame[..6].fill(0xff);
+    frame[6..12].copy_from_slice(&source_mac);
+    frame[12..14].copy_from_slice(&0x88b5u16.to_be_bytes());
+    frame[14..27].copy_from_slice(b"VANTARA_TX_V1");
+
+    // SAFETY: the selected TX buffer and descriptor belong exclusively to the
+    // initialized ring. The 60-byte frame fits its page and the descriptor
+    // index is bounded by `DMA_RING_DEPTH`.
+    unsafe {
+        core::ptr::copy_nonoverlapping(frame.as_ptr(), buffer_pointer, frame.len());
+        core::ptr::write_volatile(
+            descriptor_pointer.add(index),
+            TransmitDescriptor {
+                address: queues.transmit_buffers[index],
+                length: frame.len() as u16,
+                checksum_offset: 0,
+                command: TRANSMIT_COMMAND_EOP_IFCS_RS,
+                status: 0,
+                checksum_start: 0,
+                special: 0,
+            },
+        );
+        fence(Ordering::SeqCst);
+        let next = (index + 1) % DMA_RING_DEPTH;
+        registers.write(REG_TRANSMIT_DESC_TAIL, next as u32);
+        for _ in 0..TRANSMIT_POLL_LIMIT {
+            let descriptor = core::ptr::read_volatile(descriptor_pointer.add(index));
+            if descriptor.status & DESCRIPTOR_DONE != 0 {
+                queues.transmit_next = next as u16;
+                return true;
+            }
+            core::hint::spin_loop();
+        }
+    }
+    false
 }
 
 pub fn write_devices_to_buffer(out: &mut [u8]) -> usize {
@@ -384,7 +450,7 @@ pub fn write_devices_to_buffer(out: &mut [u8]) -> usize {
     writer.write_dec(devices.len() as u64);
     writer.write_byte(b'\n');
     writer.write_str(
-        "BDF       VENDOR:DEVICE TYPE      DRIVER       BAR0             MMIO LINK MAC               RXQ TXQ DEPTH\n",
+        "BDF       VENDOR:DEVICE TYPE      DRIVER       BAR0             MMIO LINK MAC               RXQ TXQ DEPTH TXOK TXPACKETS\n",
     );
 
     for device in devices.iter() {
@@ -415,6 +481,10 @@ pub fn write_devices_to_buffer(out: &mut [u8]) -> usize {
         writer.write_dec(device.tx_queue_ready as u64);
         writer.write_byte(b' ');
         writer.write_dec(device.queue_depth as u64);
+        writer.write_byte(b' ');
+        writer.write_dec(device.tx_test_ok as u64);
+        writer.write_byte(b' ');
+        writer.write_dec(device.tx_packets);
         writer.write_byte(b'\n');
     }
 
