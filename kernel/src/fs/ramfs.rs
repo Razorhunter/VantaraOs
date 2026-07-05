@@ -12,6 +12,11 @@ const ROOT_INODE: u64 = 1;
 const BIN_INODE: u64 = 2;
 const TMP_INODE: u64 = 3;
 const FIRST_WRITABLE_INODE: u64 = 10_000;
+const BASE_DIRECTORY_INODE: u64 = 20_000;
+const BASE_DIRECTORIES: &[&str] = &[
+    "System", "Apps", "Users", "Config", "Data", "Cache", "Logs", "Runtime", "Devices", "Temp",
+    "Packages", "Boot", "Volumes",
+];
 
 static README: &[u8] =
     b"Vantara OS RAM filesystem\n\nThis filesystem has read-only system files and writable /tmp storage.\n";
@@ -52,15 +57,19 @@ impl FilesystemBackend for RamFilesystem {
         let mut written = 0;
         match path {
             "/" => {
-                for name in ["README", "VERSION", "MOTD", "bin", "tmp"] {
+                for name in ["README", "VERSION", "MOTD", "bin", "tmp"]
+                    .into_iter()
+                    .chain(BASE_DIRECTORIES.iter().copied())
+                {
                     written = append_line(out, written, name.as_bytes())?;
                 }
             }
-            "/bin" => {
+            "/bin" | "/Apps" => {
                 for name in crate::user::images::USERLAND_IMAGE_NAMES {
                     written = append_line(out, written, name.as_bytes())?;
                 }
             }
+            path if path != "/Temp" && base_directory(path).is_some() => {}
             path => {
                 let store = WRITABLE_FS.lock();
                 let directory = store.resolve_path(path).ok_or(FsError::NotFound)?;
@@ -81,14 +90,19 @@ impl FilesystemBackend for RamFilesystem {
 
     fn stat(&self, path: &str) -> Result<BackendStat, FsError> {
         let (file_type, size, readonly, inode) = match path {
-            "/" => (FileType::Directory, 5, true, ROOT_INODE),
-            "/bin" => (
+            "/" => (
+                FileType::Directory,
+                5 + BASE_DIRECTORIES.len(),
+                true,
+                ROOT_INODE,
+            ),
+            "/bin" | "/Apps" => (
                 FileType::Directory,
                 crate::user::images::USERLAND_IMAGE_NAMES.len(),
                 true,
                 BIN_INODE,
             ),
-            "/tmp" => {
+            "/tmp" | "/Temp" => {
                 let store = WRITABLE_FS.lock();
                 (
                     FileType::Directory,
@@ -100,6 +114,10 @@ impl FilesystemBackend for RamFilesystem {
                     false,
                     TMP_INODE,
                 )
+            }
+            path if base_directory(path).is_some() => {
+                let (inode, _) = base_directory(path).unwrap_or((0, ""));
+                (FileType::Directory, 0, true, inode)
             }
             path => {
                 if let Some(entry) = find_static(path) {
@@ -260,10 +278,12 @@ impl WritableStore {
     }
 
     fn resolve_path(&self, path: &str) -> Option<u64> {
-        if path == "/tmp" {
+        if path == "/tmp" || path == "/Temp" {
             return Some(TMP_INODE);
         }
-        let relative = path.strip_prefix("/tmp/")?;
+        let relative = path
+            .strip_prefix("/tmp/")
+            .or_else(|| path.strip_prefix("/Temp/"))?;
         let mut parent = TMP_INODE;
         for component in relative.split('/') {
             if component.is_empty() {
@@ -420,6 +440,25 @@ fn find_static(path: &str) -> Option<StaticRef> {
         .find(|entry| entry.path == path)
         .map(StaticRef::BuiltIn)
         .or_else(|| crate::user::images::find(path).map(StaticRef::Userland))
+        .or_else(|| {
+            let suffix = path.strip_prefix("/Apps/")?;
+            crate::user::images::USERLAND_IMAGES
+                .iter()
+                .copied()
+                .find(|image| image.path.strip_prefix("/bin/") == Some(suffix))
+                .map(StaticRef::Userland)
+        })
+}
+
+fn base_directory(path: &str) -> Option<(u64, &'static str)> {
+    let name = path.strip_prefix('/')?;
+    if name.contains('/') {
+        return None;
+    }
+    BASE_DIRECTORIES
+        .iter()
+        .position(|candidate| *candidate == name)
+        .map(|index| (BASE_DIRECTORY_INODE + index as u64, BASE_DIRECTORIES[index]))
 }
 
 fn static_by_inode(inode: u64) -> Option<StaticRef> {
@@ -445,7 +484,7 @@ fn userland_inode(path: &str) -> u64 {
 }
 
 fn split_parent_name(path: &str) -> Result<(&str, &[u8]), FsError> {
-    if !path.starts_with("/tmp/") {
+    if !path.starts_with("/tmp/") && !path.starts_with("/Temp/") {
         return Err(FsError::ReadOnly);
     }
     let split = path.rfind('/').ok_or(FsError::InvalidPath)?;

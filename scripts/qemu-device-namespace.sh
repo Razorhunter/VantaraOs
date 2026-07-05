@@ -65,6 +65,7 @@ send_text() {
       "-") key="minus" ;;
       ".") key="dot" ;;
       [a-z0-9]) key="${char}" ;;
+      [A-Z]) key="shift-${char,,}" ;;
       *)
         echo "unsupported QEMU sendkey character: ${char}" >&2
         return 2
@@ -102,11 +103,37 @@ exec 3<>"${MONITOR_FIFO}"
 QEMU_PID=$!
 
 wait_for_log "[VFS] mounted backend=devfs path=/dev mount_id=3"
+wait_for_log "[VFS] mounted backend=devfs path=/Devices mount_id=5"
+wait_for_log "driver=IntelE1000"
+wait_for_log "mmio_ready=true"
+wait_for_log "mac_valid=true"
+wait_for_log "rxq=true"
+wait_for_log "txq=true"
+wait_for_log "depth=16"
 wait_for_log "login: "
 send_text "root"
 wait_for_log 'root:/$ '
 
 run_command "ls /" "dev"
+run_command "ls /" "System"
+run_command "ls /" "Apps"
+run_command "ls /" "Users"
+run_command "ls /" "Config"
+run_command "ls /" "Data"
+run_command "ls /" "Cache"
+run_command "ls /" "Logs"
+run_command "ls /" "Runtime"
+run_command "ls /" "Devices"
+run_command "ls /" "Temp"
+run_command "ls /" "Packages"
+run_command "ls /" "Boot"
+run_command "ls /" "Volumes"
+run_command "cat /Devices/drivers" "devfs"
+run_command "cat /Devices/net" "e1000"
+run_command "stat /System" "type: dir"
+run_command "stat /Apps/ls" "type: file"
+run_command "mkdir /Temp/layout"
+run_command "stat /Temp/layout" "type: dir"
 run_command "ls /dev" "drivers"
 run_command "cat /dev/drivers" "devfs"
 run_command "cat /dev/pci" "PCI devices:"

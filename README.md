@@ -142,6 +142,12 @@ issues an explicit NVM Flush, verifies immediate readback, and proves the same
 checksum survives a second QEMU boot. The same synchronized queue path is now
 exposed as a bounds-checked `NvmeBlockDevice` with write-through flush semantics.
 See [`docs/storage.md`](docs/storage.md).
+The canonical root namespace and compatibility aliases are documented in
+[`docs/filesystem-layout.md`](docs/filesystem-layout.md).
+The current e1000/e1000e driver foundation is documented in
+[`docs/network.md`](docs/network.md).
+It currently initializes audited MMIO plus 16-entry RX/TX DMA rings; packet
+submission is the next network milestone.
 `command-smoke` boots an isolated QEMU guest for each of `ls`, `cat`, `procs`,
 and `rusthello`, then compares its serial output with stable golden snippets.
 `preemption-test` proves that a CPU-bound background process which never calls

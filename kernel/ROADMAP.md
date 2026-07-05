@@ -633,6 +633,8 @@ kepada platform OS yang boleh dibandingkan dengan kernel mainstream secara berpe
   - [x] Kekalkan compatibility entry VANTFS lama sebagai root file.
   - [x] Defer metadata lanjutan ke filesystem hardening selepas package foundation.
 - [x] VFS layer supaya filesystem backend boleh ditukar.
+  - [x] Tetapkan root layout Vantara: `/System`, `/Apps`, `/Users`, `/Config`, `/Data`, `/Cache`, `/Logs`, `/Runtime`, `/Devices`, `/Temp`, `/Packages`, `/Boot`, dan `/Volumes`.
+  - [x] Jadikan `/Data` dan `/Devices` mount canonical sambil kekalkan `/persist` dan `/dev` sebagai compatibility aliases.
   - [x] Tambah object-safe filesystem backend contract.
   - [x] Tambah mount table dan longest-prefix path resolver.
   - [x] Gunakan `(mount_id, inode)` sebagai identiti node global.
@@ -720,6 +722,12 @@ Deferred filesystem hardening:
     - [x] Buktikan partition-offset persistence merentas dua boot QEMU.
 - [ ] Network stack roadmap:
   - [ ] NIC driver
+    - [x] Detect Intel 82540EM/e1000 dan 82574L/e1000e PCI IDs.
+    - [x] Decode dan map BAR0 MMIO melalui audited uncached window.
+    - [x] Read CTRL/STATUS, link state, dan valid receive MAC address.
+    - [x] Expose mapped NIC diagnostics melalui `/Devices/net` dan QEMU regression.
+    - [x] Initialize 16-entry RX/TX descriptor rings dan dedicated packet buffers.
+    - [ ] Submit dan reclaim Ethernet frame pertama melalui TX ring.
   - [ ] Ethernet
   - [ ] ARP
   - [ ] IPv4

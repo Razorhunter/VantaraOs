@@ -141,6 +141,18 @@ pub fn read_bar_info(device: PciDevice, bar_index: u8) -> PciBar {
     decode_bar(low, high, bar_index < 5)
 }
 
+pub fn enable_memory_and_bus_master(device: PciDevice) {
+    let command_status = read_config_u32(device.bus, device.slot, device.function, 0x04);
+    let command = (command_status as u16) | (1 << 1) | (1 << 2);
+    write_config_u32(
+        device.bus,
+        device.slot,
+        device.function,
+        0x04,
+        (command_status & 0xffff_0000) | u32::from(command),
+    );
+}
+
 fn decode_bar(low: u32, high: u32, has_high: bool) -> PciBar {
     if low == 0 {
         return PciBar::Unused;
@@ -236,6 +248,23 @@ fn read_config_u32(bus: u8, slot: u8, function: u8, offset: u8) -> u32 {
 
         address_port.write(address);
         data_port.read()
+    }
+}
+
+fn write_config_u32(bus: u8, slot: u8, function: u8, offset: u8, value: u32) {
+    let address = 0x8000_0000u32
+        | ((bus as u32) << 16)
+        | ((slot as u32) << 11)
+        | ((function as u32) << 8)
+        | ((offset as u32) & 0xfc);
+
+    // SAFETY: PCI configuration mechanism #1 uses these process-global ports;
+    // initialization is single-threaded and writes one aligned config dword.
+    unsafe {
+        let mut address_port = Port::<u32>::new(CONFIG_ADDRESS);
+        let mut data_port = Port::<u32>::new(CONFIG_DATA);
+        address_port.write(address);
+        data_port.write(value);
     }
 }
 

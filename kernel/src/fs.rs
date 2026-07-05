@@ -7,6 +7,8 @@ pub const MAX_NORMALIZED_PATH_LEN: usize = 128;
 const ROOT_MOUNT_ID: MountId = MountId(1);
 const PERSISTENT_MOUNT_ID: MountId = MountId(2);
 const DEVICE_MOUNT_ID: MountId = MountId(3);
+const DATA_MOUNT_ID: MountId = MountId(4);
+const DEVICES_MOUNT_ID: MountId = MountId(5);
 static RAM_FILESYSTEM: ramfs::RamFilesystem = ramfs::RamFilesystem::new();
 static PERSISTENT_FILESYSTEM: persistent::PersistentFilesystem =
     persistent::PersistentFilesystem::new();
@@ -25,6 +27,16 @@ static ROOT_MOUNTS: &[Mount] = &[
     Mount {
         id: DEVICE_MOUNT_ID,
         path: "/dev",
+        backend: &DEVICE_FILESYSTEM,
+    },
+    Mount {
+        id: DATA_MOUNT_ID,
+        path: "/Data",
+        backend: &PERSISTENT_FILESYSTEM,
+    },
+    Mount {
+        id: DEVICES_MOUNT_ID,
+        path: "/Devices",
         backend: &DEVICE_FILESYSTEM,
     },
 ];
@@ -189,11 +201,21 @@ pub fn init() {
     );
     if PERSISTENT_FILESYSTEM.available() {
         crate::serial_println!(
+            "[VFS] mounted backend={} path=/Data mount_id={}",
+            PERSISTENT_FILESYSTEM.name(),
+            DATA_MOUNT_ID.0
+        );
+        crate::serial_println!(
             "[VFS] mounted backend={} path=/persist mount_id={}",
             PERSISTENT_FILESYSTEM.name(),
             PERSISTENT_MOUNT_ID.0
         );
     }
+    crate::serial_println!(
+        "[VFS] mounted backend={} path=/Devices mount_id={}",
+        DEVICE_FILESYSTEM.name(),
+        DEVICES_MOUNT_ID.0
+    );
     crate::serial_println!(
         "[VFS] mounted backend={} path=/dev mount_id={}",
         DEVICE_FILESYSTEM.name(),
@@ -215,10 +237,18 @@ pub fn list_to_buffer(cwd: &str, path: &str, out: &mut [u8]) -> Result<usize, Fs
             continue;
         }
         if let Some(name) = direct_mount_child(normalized.as_str(), mount.path) {
-            written = append_line(out, written, name.as_bytes())?;
+            if !contains_line(&out[..written], name.as_bytes()) {
+                written = append_line(out, written, name.as_bytes())?;
+            }
         }
     }
     Ok(written)
+}
+
+fn contains_line(listing: &[u8], candidate: &[u8]) -> bool {
+    listing
+        .split(|byte| *byte == b'\n')
+        .any(|line| line == candidate)
 }
 
 pub fn read_to_buffer(cwd: &str, path: &str, out: &mut [u8]) -> Result<usize, FsError> {

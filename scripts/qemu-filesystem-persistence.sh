@@ -45,6 +45,7 @@ send_text() {
       "-") key="minus" ;;
       ".") key="dot" ;;
       [a-z0-9]) key="${char}" ;;
+      [A-Z]) key="shift-${char,,}" ;;
       *) echo "unsupported sendkey character: ${char}" >&2; return 2 ;;
     esac
     printf 'sendkey %s\n' "${key}" >&"${fd}"
@@ -145,9 +146,9 @@ boot_and_run() (
 )
 
 boot_and_run first \
-  "mkdir /persist/docs" 'root:/$ ' \
+  "mkdir /Data/docs" 'root:/$ ' \
   "formatted new VANTFS01 volume" \
-  "write /persist/docs/hello forever" "[FD] pid="
+  "write /Data/docs/hello forever" "[FD] pid="
 boot_and_run second "cat /persist/docs/hello" "forever" "mounted existing VANTFS01 volume"
 
 echo "filesystem persistence test passed: backend=${PERSIST_BACKEND:-default} data survived two QEMU boots"

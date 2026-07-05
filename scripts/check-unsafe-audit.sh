@@ -32,6 +32,7 @@ fi
 for file in \
   kernel/src/allocator.rs \
   kernel/src/drivers/ahci.rs \
+  kernel/src/drivers/network.rs \
   kernel/src/drivers/nvme.rs \
   kernel/src/memory.rs \
   kernel/src/user/address_space.rs \
