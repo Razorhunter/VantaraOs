@@ -721,18 +721,40 @@ Deferred filesystem hardening:
     - [x] Expose active storage range melalui `/dev/partitions`.
     - [x] Buktikan partition-offset persistence merentas dua boot QEMU.
 - [ ] Network stack roadmap:
-  - [ ] NIC driver
+  - [x] NIC driver
     - [x] Detect Intel 82540EM/e1000 dan 82574L/e1000e PCI IDs.
     - [x] Decode dan map BAR0 MMIO melalui audited uncached window.
     - [x] Read CTRL/STATUS, link state, dan valid receive MAC address.
     - [x] Expose mapped NIC diagnostics melalui `/Devices/net` dan QEMU regression.
     - [x] Initialize 16-entry RX/TX descriptor rings dan dedicated packet buffers.
     - [x] Submit dan reclaim Ethernet frame pertama melalui TX ring.
-    - [ ] Poll, validate, dan recycle received Ethernet descriptors.
-  - [ ] Ethernet
-  - [ ] ARP
-  - [ ] IPv4
-  - [ ] UDP/TCP
+    - [x] Poll, validate, dan recycle received Ethernet descriptors.
+  - [x] Ethernet
+    - [x] Encode minimum padded Ethernet II frame untuk TX.
+    - [x] Parse destination/source MAC, EtherType, dan payload daripada RX DMA.
+    - [x] Dispatch IPv4, ARP, Vantara-test, dan unknown EtherTypes.
+    - [x] Reject malformed short frames dan oversized TX payloads.
+  - [x] ARP
+    - [x] Encode dan parse Ethernet/IPv4 ARP request/reply packets.
+    - [x] Belajar pemetaan IPv4-to-MAC melalui bounded per-interface cache.
+    - [x] Balas request untuk alamat IPv4 interface sendiri secara unicast.
+    - [x] Buktikan request, reply, dan cache resolution melalui dua NIC QEMU.
+  - [x] IPv4
+    - [x] Encode dan parse minimum IPv4 header tanpa options.
+    - [x] Generate dan validate Internet header checksum.
+    - [x] Validate version, IHL, total length, destination, dan protocol dispatch.
+    - [x] Reject malformed, oversized, dan fragmented packets buat masa ini.
+    - [x] Buktikan unicast IPv4 delivery selepas ARP resolution melalui dua NIC QEMU.
+  - [ ] Transport
+    - [x] UDP
+      - [x] Encode dan parse source port, destination port, length, dan payload.
+      - [x] Generate dan validate UDP checksum menggunakan IPv4 pseudo-header.
+      - [x] Reject malformed length, oversized payload, dan invalid checksum.
+      - [x] Buktikan datagram unicast port 40000 ke 7777 melalui dua NIC QEMU.
+      - [x] Tambah bounded kernel socket table dengan bind, receive queue, dan close.
+      - [x] Dispatch RX datagram kepada socket berdasarkan destination port.
+      - [x] Reject duplicate bind dan drop secara terkawal apabila queue penuh.
+    - [ ] TCP
 - [ ] USB HID dan mass storage.
 - [ ] Graphics mode selepas VGA text:
   - [ ] framebuffer

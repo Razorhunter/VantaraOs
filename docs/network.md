@@ -25,5 +25,41 @@ uses the NIC MAC as source, assigns experimental EtherType `0x88b5`, and writes
 the `VANTARA_TX_V1` marker. It advances `TDT`, polls descriptor-done, reclaims
 the slot, and exposes `tx_test=1` plus `tx_packets=1` through `/Devices/net`.
 
-Polling, validating, and recycling received descriptors is the next NIC
-milestone; Ethernet parsing, ARP, IPv4, UDP, and TCP remain pending.
+`network-rx-test` connects two e1000 devices to an isolated QEMU virtual hub.
+The second NIC's broadcast reaches the first RX ring, where the kernel validates
+the EtherType and marker, records `rx_packets=1`, clears the descriptor, and
+advances `RDT` to return ownership to the controller.
+
+The Ethernet II layer now provides bounded frame encoding and parsing. It
+extracts destination/source MAC addresses, EtherType, and payload, rejects
+short frames and oversized TX payloads, and classifies ARP (`0x0806`), IPv4
+(`0x0800`), Vantara-test (`0x88b5`), and unknown protocols. The two-NIC DMA
+regression proves the live frame reaches the `vantara-test` dispatcher.
+
+The ARP layer validates Ethernet/IPv4 ARP headers, encodes requests and replies,
+learns sender IPv4-to-MAC mappings in a bounded per-interface cache, and answers
+requests for the interface's own address. In the isolated two-NIC regression,
+`10.0.2.15` broadcasts a request for `10.0.2.16`; the peer learns the sender,
+returns a unicast reply, and the requester completes address resolution. The
+result and counters are visible through `/Devices/net`.
+
+The IPv4 layer now encodes and parses the minimum header, generates and verifies
+the Internet checksum, validates version/IHL/total length and destination, and
+rejects malformed or fragmented packets. After ARP resolution, the regression
+sends a protocol-253 packet from `10.0.2.15` to `10.0.2.16` and validates its
+source, destination, protocol, checksum, and payload after RX DMA.
+
+UDP now encodes and parses source/destination ports, validates datagram length,
+and generates and verifies the mandatory test checksum over the IPv4
+pseudo-header. The live regression delivers `VANTARA_UDPV1` from port `40000`
+to port `7777` after ARP resolution and validates it after RX DMA.
+
+The kernel UDP socket layer provides bounded `bind`, non-blocking `receive`, and
+`close` operations. Destination-port dispatch places validated datagrams into a
+four-entry socket queue, rejects duplicate binds, and counts controlled drops
+when a queue is full. The QEMU path now proves the packet reaches a socket bound
+to port `7777`, rather than stopping at the UDP parser.
+
+The e1000 NIC-driver, Ethernet, ARP, IPv4, UDP, and kernel receive-socket
+baselines are complete. User-facing socket syscalls, UDP send API, and TCP
+remain pending.

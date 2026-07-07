@@ -42,7 +42,7 @@ COMMAND_SMOKE_TARGETS := $(addprefix command-smoke-,$(COMMAND_SMOKE_CASES))
 	run \
 	persist-disk reset-persist \
 	smoke boot-test command-smoke $(COMMAND_SMOKE_TARGETS) \
-	service-manager-test device-namespace-test \
+	service-manager-test device-namespace-test network-rx-test \
 	filesystem-write-test filesystem-persistence-test block-cache-test partition-test \
 	ahci-test ahci-write-test ahci-vantfs-test ahci-persist-test storage-policy-test nvme-test nvme-write-test preemption-test \
 	kernel-thread-preemption-test signal-test terminal-signal-test isolation-test \
@@ -69,6 +69,7 @@ help:
 	@echo "  make boot-test"
 	@echo "  make service-manager-test"
 	@echo "  make device-namespace-test"
+	@echo "  make network-rx-test"
 	@echo "  make command-smoke"
 	@echo "  make filesystem-write-test"
 	@echo "  make filesystem-persistence-test"
@@ -220,6 +221,9 @@ service-manager-test: kernel-build
 
 device-namespace-test: kernel-build
 	QEMU="$(QEMU)" bash scripts/qemu-device-namespace.sh
+
+network-rx-test: kernel-build
+	QEMU="$(QEMU)" bash scripts/qemu-network-rx.sh
 
 command-smoke: kernel-build
 	QEMU="$(QEMU)" bash scripts/qemu-command-smoke.sh
