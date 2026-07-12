@@ -41,9 +41,13 @@ ORG USER_BASE
 %define SYS_RENAME        52
 %define SYS_MKDIR         53
 %define SYS_RMDIR         54
+%define SYS_UDP_BIND      55
+%define SYS_UDP_SEND_TO   56
+%define SYS_UDP_RECV_FROM 57
+%define SYS_UDP_CLOSE     58
 
 %define ABI_VERSION_MAJOR 1
-%define ABI_VERSION_MINOR 12
+%define ABI_VERSION_MINOR 13
 
 %define ERR_UNKNOWN_SYSCALL -1
 %define ERR_INVALID_ARGUMENT -2

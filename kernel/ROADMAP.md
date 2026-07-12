@@ -755,6 +755,8 @@ Deferred filesystem hardening:
       - [x] Dispatch RX datagram kepada socket berdasarkan destination port.
       - [x] Reject duplicate bind dan drop secara terkawal apabila queue penuh.
       - [x] Tambah kernel UDP send API yang guna bound source port, ARP cache, IPv4, dan Ethernet TX path.
+      - [x] Expose user-facing UDP syscalls untuk bind, send_to, recv_from, dan close.
+      - [x] Tambah `/bin/udpdemo` command smoke untuk validate UDP syscall ABI surface.
     - [ ] TCP
 - [ ] USB HID dan mass storage.
 - [ ] Graphics mode selepas VGA text:

@@ -1,0 +1,4 @@
+udpdemo: bind ok
+udpdemo: duplicate guard ok
+udpdemo: empty receive ok
+udpdemo: done

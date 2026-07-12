@@ -62,9 +62,13 @@ pub const SYS_UNLINK: u64 = 51;
 pub const SYS_RENAME: u64 = 52;
 pub const SYS_MKDIR: u64 = 53;
 pub const SYS_RMDIR: u64 = 54;
+pub const SYS_UDP_BIND: u64 = 55;
+pub const SYS_UDP_SEND_TO: u64 = 56;
+pub const SYS_UDP_RECV_FROM: u64 = 57;
+pub const SYS_UDP_CLOSE: u64 = 58;
 
 pub const ABI_VERSION_MAJOR: u64 = 1;
-pub const ABI_VERSION_MINOR: u64 = 12;
+pub const ABI_VERSION_MINOR: u64 = 13;
 pub const ABI_VERSION: u64 = (ABI_VERSION_MAJOR << 32) | ABI_VERSION_MINOR;
 
 pub const SYSCALL_RETURN_TO_KERNEL: u64 = u64::MAX;
@@ -502,6 +506,10 @@ const _: () = {
     assert!(SYS_RENAME == 52);
     assert!(SYS_MKDIR == 53);
     assert!(SYS_RMDIR == 54);
+    assert!(SYS_UDP_BIND == 55);
+    assert!(SYS_UDP_SEND_TO == 56);
+    assert!(SYS_UDP_RECV_FROM == 57);
+    assert!(SYS_UDP_CLOSE == 58);
     assert!(SyscallError::UnknownSyscall as i64 == -1);
     assert!(SyscallError::WouldBlock as i64 == -6);
 };
@@ -542,6 +550,15 @@ pub struct UserFileStat {
     pub readonly: u64,
     pub file_type: u64,
     pub inode: u64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(C)]
+pub struct UserUdpDatagramMeta {
+    pub source_ip: u32,
+    pub source_port: u16,
+    pub destination_port: u16,
+    pub payload_len: u64,
 }
 
 pub fn init() {
@@ -894,6 +911,14 @@ pub fn dispatch(frame: SyscallFrame) -> Result<u64, SyscallError> {
         SYS_RENAME => rename_file(frame.arg0, frame.arg1, frame.arg2, frame.arg3),
         SYS_MKDIR => mkdir_user(frame.arg0, frame.arg1),
         SYS_RMDIR => rmdir_user(frame.arg0, frame.arg1),
+        SYS_UDP_BIND => udp_bind_user(frame.arg0),
+        SYS_UDP_SEND_TO => {
+            udp_send_to_user(frame.arg0, frame.arg1, frame.arg2, frame.arg3, frame.arg4)
+        }
+        SYS_UDP_RECV_FROM => {
+            udp_recv_from_user(frame.arg0, frame.arg1, frame.arg2, frame.arg3, frame.arg4)
+        }
+        SYS_UDP_CLOSE => udp_close_user(frame.arg0),
         SYS_SLEEP_MS => Err(SyscallError::NotImplemented),
         SYS_YIELD => Err(SyscallError::NotImplemented),
         SYS_EXIT => Err(SyscallError::NotImplemented),
@@ -1257,6 +1282,82 @@ fn rmdir_user(path_ptr: u64, path_len: u64) -> Result<u64, SyscallError> {
     crate::fs::rmdir_from(cwd.as_str(), path)
         .map(|_| 0)
         .map_err(|_| SyscallError::InvalidArgument)
+}
+
+fn udp_bind_user(local_port: u64) -> Result<u64, SyscallError> {
+    let port = u16::try_from(local_port).map_err(|_| SyscallError::InvalidArgument)?;
+    crate::drivers::network::udp_bind(port)
+        .map(|handle| handle.as_raw())
+        .map_err(map_udp_socket_error)
+}
+
+fn udp_send_to_user(
+    handle: u64,
+    destination_ip: u64,
+    destination_port: u64,
+    payload_ptr: u64,
+    payload_len: u64,
+) -> Result<u64, SyscallError> {
+    let handle =
+        crate::drivers::network::UdpSocketHandle::from_raw(handle).map_err(map_udp_socket_error)?;
+    let destination_port =
+        u16::try_from(destination_port).map_err(|_| SyscallError::InvalidArgument)?;
+    let payload = read_user_bytes(payload_ptr, payload_len)?;
+    let destination_ip = (destination_ip as u32).to_be_bytes();
+    crate::drivers::network::udp_send_to(handle, destination_ip, destination_port, payload)
+        .map(|_| payload_len)
+        .map_err(map_udp_socket_error)
+}
+
+fn udp_recv_from_user(
+    handle: u64,
+    out_ptr: u64,
+    out_len: u64,
+    meta_ptr: u64,
+    meta_len: u64,
+) -> Result<u64, SyscallError> {
+    let handle =
+        crate::drivers::network::UdpSocketHandle::from_raw(handle).map_err(map_udp_socket_error)?;
+    if meta_len < core::mem::size_of::<UserUdpDatagramMeta>() as u64 {
+        return Err(SyscallError::InvalidArgument);
+    }
+    let out = user_write_range(out_ptr, out_len)?;
+    let meta_out = user_write_range(meta_ptr, core::mem::size_of::<UserUdpDatagramMeta>() as u64)?;
+    let datagram = crate::drivers::network::udp_receive(handle).map_err(map_udp_socket_error)?;
+    let payload_len = usize::from(datagram.payload_len);
+    if payload_len > out.len() {
+        return Err(SyscallError::InvalidArgument);
+    }
+    out[..payload_len].copy_from_slice(&datagram.payload[..payload_len]);
+
+    meta_out.fill(0);
+    meta_out[..4].copy_from_slice(&u32::from_be_bytes(datagram.source_ip).to_ne_bytes());
+    meta_out[4..6].copy_from_slice(&datagram.source_port.to_ne_bytes());
+    meta_out[6..8].copy_from_slice(&datagram.destination_port.to_ne_bytes());
+    meta_out[8..16].copy_from_slice(&(payload_len as u64).to_ne_bytes());
+    Ok(payload_len as u64)
+}
+
+fn udp_close_user(handle: u64) -> Result<u64, SyscallError> {
+    let handle =
+        crate::drivers::network::UdpSocketHandle::from_raw(handle).map_err(map_udp_socket_error)?;
+    crate::drivers::network::udp_close(handle)
+        .map(|_| 0)
+        .map_err(map_udp_socket_error)
+}
+
+fn map_udp_socket_error(error: crate::drivers::network::UdpSocketError) -> SyscallError {
+    match error {
+        crate::drivers::network::UdpSocketError::WouldBlock
+        | crate::drivers::network::UdpSocketError::SocketLimit
+        | crate::drivers::network::UdpSocketError::NoRoute
+        | crate::drivers::network::UdpSocketError::ArpUnresolved
+        | crate::drivers::network::UdpSocketError::TransmitFailed => SyscallError::WouldBlock,
+        crate::drivers::network::UdpSocketError::InvalidPort
+        | crate::drivers::network::UdpSocketError::AddressInUse
+        | crate::drivers::network::UdpSocketError::InvalidHandle
+        | crate::drivers::network::UdpSocketError::PayloadTooLarge => SyscallError::InvalidArgument,
+    }
 }
 
 fn rename_file(

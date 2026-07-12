@@ -84,6 +84,19 @@ pub enum UdpSocketError {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct UdpSocketHandle(u16);
 
+impl UdpSocketHandle {
+    pub fn from_raw(raw: u64) -> Result<Self, UdpSocketError> {
+        if raw == 0 || raw > u64::from(u16::MAX) {
+            return Err(UdpSocketError::InvalidHandle);
+        }
+        Ok(Self(raw as u16))
+    }
+
+    pub fn as_raw(self) -> u64 {
+        u64::from(self.0)
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ReceivedUdpDatagram {
     pub source_ip: [u8; 4],

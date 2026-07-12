@@ -151,8 +151,8 @@ submission and TX descriptor reclaim are verified with a boot-time Ethernet
 frame. A two-NIC QEMU hub regression also validates RX polling and descriptor
 recycling. Ethernet II encoding, parsing, and EtherType dispatch are complete;
 ARP resolution plus checksummed IPv4 and UDP send/receive through bounded kernel
-sockets are covered by the two-NIC QEMU regression. User socket syscalls and TCP
-remain pending.
+sockets are covered by the two-NIC QEMU regression. Userland can exercise UDP
+through `/bin/udpdemo`; TCP remains pending.
 `command-smoke` boots an isolated QEMU guest for each of `ls`, `cat`, `procs`,
 and `rusthello`, then compares its serial output with stable golden snippets.
 `preemption-test` proves that a CPU-bound background process which never calls

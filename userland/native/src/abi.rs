@@ -55,9 +55,13 @@ pub const SYS_UNLINK: u64 = 51;
 pub const SYS_RENAME: u64 = 52;
 pub const SYS_MKDIR: u64 = 53;
 pub const SYS_RMDIR: u64 = 54;
+pub const SYS_UDP_BIND: u64 = 55;
+pub const SYS_UDP_SEND_TO: u64 = 56;
+pub const SYS_UDP_RECV_FROM: u64 = 57;
+pub const SYS_UDP_CLOSE: u64 = 58;
 
 pub const ABI_VERSION_MAJOR: u64 = 1;
-pub const ABI_VERSION_MINOR: u64 = 12;
+pub const ABI_VERSION_MINOR: u64 = 13;
 pub const ABI_VERSION: u64 = (ABI_VERSION_MAJOR << 32) | ABI_VERSION_MINOR;
 
 pub const ERR_UNKNOWN_SYSCALL: i64 = -1;
@@ -111,6 +115,10 @@ const _: () = {
     assert!(SYS_RENAME == 52);
     assert!(SYS_MKDIR == 53);
     assert!(SYS_RMDIR == 54);
+    assert!(SYS_UDP_BIND == 55);
+    assert!(SYS_UDP_SEND_TO == 56);
+    assert!(SYS_UDP_RECV_FROM == 57);
+    assert!(SYS_UDP_CLOSE == 58);
     assert!(ERR_UNKNOWN_SYSCALL == -1);
     assert!(ERR_WOULD_BLOCK == -6);
     assert!(ERR_PERMISSION_DENIED == -7);
@@ -123,6 +131,15 @@ pub struct FileStat {
     pub readonly: u64,
     pub file_type: u64,
     pub inode: u64,
+}
+
+#[derive(Debug, Clone, Copy, Default)]
+#[repr(C)]
+pub struct UdpDatagramMeta {
+    pub source_ip: u32,
+    pub source_port: u16,
+    pub destination_port: u16,
+    pub payload_len: u64,
 }
 
 pub fn write(text: &str) -> u64 {
@@ -347,6 +364,46 @@ pub fn pci_list(out: &mut [u8]) -> usize {
 
 pub fn netdev_list(out: &mut [u8]) -> usize {
     unsafe { syscall2(SYS_NETDEV_LIST, out.as_mut_ptr() as u64, out.len() as u64) as usize }
+}
+
+pub fn udp_bind(local_port: u16) -> i64 {
+    unsafe { syscall1(SYS_UDP_BIND, local_port as u64) as i64 }
+}
+
+pub fn udp_send_to(
+    handle: u64,
+    destination_ip: [u8; 4],
+    destination_port: u16,
+    payload: &[u8],
+) -> i64 {
+    let ip = u32::from_be_bytes(destination_ip) as u64;
+    unsafe {
+        syscall5(
+            SYS_UDP_SEND_TO,
+            handle,
+            ip,
+            destination_port as u64,
+            payload.as_ptr() as u64,
+            payload.len() as u64,
+        ) as i64
+    }
+}
+
+pub fn udp_recv_from(handle: u64, out: &mut [u8], meta: &mut UdpDatagramMeta) -> i64 {
+    unsafe {
+        syscall5(
+            SYS_UDP_RECV_FROM,
+            handle,
+            out.as_mut_ptr() as u64,
+            out.len() as u64,
+            (meta as *mut UdpDatagramMeta) as u64,
+            core::mem::size_of::<UdpDatagramMeta>() as u64,
+        ) as i64
+    }
+}
+
+pub fn udp_close(handle: u64) -> i64 {
+    unsafe { syscall1(SYS_UDP_CLOSE, handle) as i64 }
 }
 
 pub fn kernel_log(out: &mut [u8]) -> usize {
@@ -586,6 +643,23 @@ unsafe fn syscall4(number: u64, arg0: u64, arg1: u64, arg2: u64, arg3: u64) -> u
             in("rsi") arg1,
             in("rdx") arg2,
             in("r10") arg3,
+            options(nostack, preserves_flags)
+        );
+    }
+    ret
+}
+
+unsafe fn syscall5(number: u64, arg0: u64, arg1: u64, arg2: u64, arg3: u64, arg4: u64) -> u64 {
+    let ret: u64;
+    unsafe {
+        asm!(
+            "int 0x80",
+            inlateout("rax") number => ret,
+            in("rdi") arg0,
+            in("rsi") arg1,
+            in("rdx") arg2,
+            in("r10") arg3,
+            in("r8") arg4,
             options(nostack, preserves_flags)
         );
     }

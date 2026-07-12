@@ -67,5 +67,11 @@ cache, then builds UDP, IPv4, and Ethernet headers before submitting the frame t
 the e1000 transmit ring. The live QEMU regression sends from a socket bound to
 port `40000` and receives on the peer socket bound to `7777`.
 
+The syscall ABI now exposes UDP `bind`, `send_to`, `recv_from`, and `close`
+operations to userland. `/bin/udpdemo` validates the public ABI surface,
+including duplicate-bind rejection, non-blocking empty receive semantics, and
+clean close. UDP send from userland succeeds when a route is already resolved,
+and otherwise reports a non-blocking unavailable state.
+
 The e1000 NIC-driver, Ethernet, ARP, IPv4, UDP, and kernel receive-socket
-baselines are complete. User-facing socket syscalls and TCP remain pending.
+baselines are complete. TCP remains pending.

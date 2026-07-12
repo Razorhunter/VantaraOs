@@ -7,7 +7,13 @@ USERLAND_DIR="${ROOT_DIR}/target/userland"
 REGISTRY="${ROOT_DIR}/target/generated/userland_images.rs"
 BUILD_METADATA="${ROOT_DIR}/target/generated/build-metadata.tsv"
 MANIFEST="${ROOT_DIR}/target/artifact-manifest.tsv"
-TEMP_MANIFEST="${MANIFEST}.tmp"
+TEMP_MANIFEST="${MANIFEST}.$$ .tmp"
+TEMP_MANIFEST="${TEMP_MANIFEST// /}"
+
+cleanup() {
+  rm -f "${TEMP_MANIFEST}"
+}
+trap cleanup EXIT
 
 require_artifact() {
   local path="$1"
@@ -55,6 +61,7 @@ mkdir -p "${ROOT_DIR}/target"
 } >"${TEMP_MANIFEST}"
 
 mv "${TEMP_MANIFEST}" "${MANIFEST}"
+trap - EXIT
 
 echo "artifact manifest generated: ${MANIFEST}"
 echo "artifacts: $(( $(wc -l <"${MANIFEST}") - 1 ))"
