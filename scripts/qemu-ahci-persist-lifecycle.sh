@@ -6,11 +6,10 @@ CARGO_TARGET_DIR="${ROOT_DIR}/target/storage-ahci-cargo"
 BOOTIMAGE="${CARGO_TARGET_DIR}/x86_64-vantara_os/debug/bootimage-kernel.bin"
 DISK_IMAGE="${ROOT_DIR}/target/vantara-ahci-persist-test.img"
 
-(
-  cd "${ROOT_DIR}/kernel"
-  CARGO_TARGET_DIR="${CARGO_TARGET_DIR}" \
-    cargo bootimage --no-default-features --features storage-ahci
-)
+bash "${ROOT_DIR}/scripts/build-kernel-variant.sh" \
+  "${CARGO_TARGET_DIR}" \
+  --no-default-features \
+  --features storage-ahci
 
 BOOTIMAGE_OVERRIDE="${BOOTIMAGE}" \
 PERSIST_IMAGE_OVERRIDE="${DISK_IMAGE}" \

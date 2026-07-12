@@ -13,10 +13,9 @@ if ! command -v "${QEMU_BIN}" >/dev/null 2>&1; then
 fi
 
 mkdir -p "${ROOT_DIR}/target"
-(
-  cd "${ROOT_DIR}/kernel"
-  CARGO_TARGET_DIR="${CARGO_TARGET_DIR}" cargo bootimage --features nvme-write-test
-)
+bash "${ROOT_DIR}/scripts/build-kernel-variant.sh" \
+  "${CARGO_TARGET_DIR}" \
+  --features nvme-write-test
 
 rm -f "${NVME_IMAGE}"
 truncate -s 1M "${NVME_IMAGE}"

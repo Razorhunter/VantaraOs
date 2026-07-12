@@ -2,7 +2,7 @@
 set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-BOOTIMAGE="${BOOTIMAGE_OVERRIDE:-${ROOT_DIR}/kernel/target/x86_64-vantara_os/debug/bootimage-kernel.bin}"
+BOOTIMAGE="${BOOTIMAGE_OVERRIDE:-${ROOT_DIR}/target/kernel/x86_64-vantara_os/debug/bootimage-kernel.bin}"
 QEMU_BIN="${QEMU:-qemu-system-x86_64}"
 DISK_IMAGE="${PERSIST_IMAGE_OVERRIDE:-${ROOT_DIR}/target/vantara-persist-test.img}"
 QEMU_MACHINE="${QEMU_MACHINE:-}"

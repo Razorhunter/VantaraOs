@@ -2,7 +2,7 @@
 set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-BOOTIMAGE="${ROOT_DIR}/kernel/target/x86_64-vantara_os/debug/bootimage-kernel.bin"
+BOOTIMAGE="${ROOT_DIR}/target/kernel/x86_64-vantara_os/debug/bootimage-kernel.bin"
 LOG_FILE="${ROOT_DIR}/target/qemu-network-rx.log"
 QEMU_LOG="${ROOT_DIR}/target/qemu-network-rx-qemu.log"
 QEMU_BIN="${QEMU:-qemu-system-x86_64}"
@@ -58,7 +58,8 @@ wait_for_log() {
 
 wait_for_log "[NET] detected 2 network device(s)"
 wait_for_log "ip=10.0.2.15 arp_requests=0 arp_replies=1 arp_resolved=true ipv4_packets=0"
-wait_for_log "protocol=ipv4 ip=10.0.2.16 arp_requests=1 arp_replies=1 arp_resolved=true ipv4_packets=1 ipv4_checksum=true ipv4_source=10.0.2.15 ipv4_destination=10.0.2.16 ipv4_protocol=17 udp_packets=1 udp_checksum=true udp_source_port=40000 udp_destination_port=7777 udp_socket_delivered=true"
+wait_for_log "udp_send_ok=true udp_socket_delivered=false"
+wait_for_log "protocol=ipv4 ip=10.0.2.16 arp_requests=1 arp_replies=1 arp_resolved=true ipv4_packets=1 ipv4_checksum=true ipv4_source=10.0.2.15 ipv4_destination=10.0.2.16 ipv4_protocol=17 udp_packets=1 udp_checksum=true udp_source_port=40000 udp_destination_port=7777 udp_send_ok=false udp_socket_delivered=true"
 
 if grep -Fq "KERNEL PANIC" "${LOG_FILE}"; then
   echo "network RX test failed: kernel panic detected" >&2
@@ -69,5 +70,5 @@ kill "${QEMU_PID}" >/dev/null 2>&1 || true
 wait "${QEMU_PID}" >/dev/null 2>&1 || true
 QEMU_PID=""
 
-echo "network UDP socket test passed: checksummed datagram delivered to bound port 7777"
+echo "network UDP send/receive socket test passed: checksummed datagram delivered to bound port 7777"
 echo "serial log: ${LOG_FILE}"

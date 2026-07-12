@@ -2,7 +2,7 @@
 set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-BOOTIMAGE="${ROOT_DIR}/kernel/target/x86_64-vantara_os/debug/bootimage-kernel.bin"
+BOOTIMAGE="${ROOT_DIR}/target/kernel/x86_64-vantara_os/debug/bootimage-kernel.bin"
 INITRD="${ROOT_DIR}/target/vantara-initrd.tar"
 INITRD_MANIFEST="${ROOT_DIR}/target/initrd-manifest.tsv"
 BUILD_METADATA="${ROOT_DIR}/target/generated/build-metadata.tsv"

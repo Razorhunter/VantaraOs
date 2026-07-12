@@ -60,6 +60,12 @@ four-entry socket queue, rejects duplicate binds, and counts controlled drops
 when a queue is full. The QEMU path now proves the packet reaches a socket bound
 to port `7777`, rather than stopping at the UDP parser.
 
+UDP also has a kernel send API. A caller sends through a bound socket handle, so
+the source port comes from the socket table. The TX path validates destination
+ports and payload size, resolves the destination through the per-interface ARP
+cache, then builds UDP, IPv4, and Ethernet headers before submitting the frame to
+the e1000 transmit ring. The live QEMU regression sends from a socket bound to
+port `40000` and receives on the peer socket bound to `7777`.
+
 The e1000 NIC-driver, Ethernet, ARP, IPv4, UDP, and kernel receive-socket
-baselines are complete. User-facing socket syscalls, UDP send API, and TCP
-remain pending.
+baselines are complete. User-facing socket syscalls and TCP remain pending.

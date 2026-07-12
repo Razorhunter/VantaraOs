@@ -13,10 +13,9 @@ if ! command -v "${QEMU_BIN}" >/dev/null 2>&1; then
 fi
 
 mkdir -p "${ROOT_DIR}/target"
-(
-  cd "${ROOT_DIR}/kernel"
-  CARGO_TARGET_DIR="${CARGO_TARGET_DIR}" cargo bootimage --features ahci-vantfs-test
-)
+bash "${ROOT_DIR}/scripts/build-kernel-variant.sh" \
+  "${CARGO_TARGET_DIR}" \
+  --features ahci-vantfs-test
 
 cp "${BOOTIMAGE}" "${DISK_IMAGE}"
 image_size="$(stat -c %s "${DISK_IMAGE}")"

@@ -1,8 +1,11 @@
 KERNEL_DIR := kernel
+KERNEL_TARGET_DIR := target/kernel
+KERNEL_TARGET_SPEC := target/generated/x86_64-vantara_os.json
 USERLAND_DIR := userland/native
 USERLAND_BIN_DIR := target/userland
 TARGET := x86_64-vantara_os
-BOOTIMAGE := $(KERNEL_DIR)/target/$(TARGET)/debug/bootimage-kernel.bin
+CARGO_PATH := /usr/local/cargo/bin:$(PATH)
+BOOTIMAGE := $(KERNEL_TARGET_DIR)/$(TARGET)/debug/bootimage-kernel.bin
 
 QEMU ?= qemu-system-x86_64
 PERSIST_IMAGE ?= target/vantara-persist.img
@@ -37,7 +40,7 @@ COMMAND_SMOKE_TARGETS := $(addprefix command-smoke-,$(COMMAND_SMOKE_CASES))
 	help \
 	build docker-build shell docker-run docker-regression docker-preemption-test \
 	fmt check test kernel-fmt kernel-check kernel-test userland-fmt userland-check \
-	kernel-build userland-bin artifact-manifest initrd package package-test \
+	kernel-target-spec kernel-build userland-bin artifact-manifest initrd package package-test \
 	abi-check unsafe-audit \
 	run \
 	persist-disk reset-persist \
@@ -126,19 +129,19 @@ check: abi-check unsafe-audit kernel-check userland-check
 test: kernel-test
 
 kernel-fmt:
-	cd $(KERNEL_DIR) && cargo fmt
+	cd $(KERNEL_DIR) && PATH="$(CARGO_PATH)" cargo fmt
 
 userland-fmt:
 	cd $(USERLAND_DIR) && cargo fmt
 
-kernel-check: userland-bin
-	cd $(KERNEL_DIR) && cargo check --tests
+kernel-check: userland-bin kernel-target-spec
+	cd $(KERNEL_DIR) && PATH="$(CARGO_PATH)" CARGO_TARGET_DIR=../$(KERNEL_TARGET_DIR) cargo check --tests --target ../$(KERNEL_TARGET_SPEC)
 
-kernel-test: userland-bin
-	cd $(KERNEL_DIR) && cargo check --tests
+kernel-test: userland-bin kernel-target-spec
+	cd $(KERNEL_DIR) && PATH="$(CARGO_PATH)" CARGO_TARGET_DIR=../$(KERNEL_TARGET_DIR) cargo check --tests --target ../$(KERNEL_TARGET_SPEC)
 
 userland-check:
-	cd $(USERLAND_DIR) && cargo check
+	cd $(USERLAND_DIR) && PATH="$(CARGO_PATH)" cargo check
 
 abi-check:
 	bash scripts/check-syscall-abi.sh
@@ -148,8 +151,13 @@ unsafe-audit:
 
 # Build
 
-kernel-build: userland-bin
-	cd $(KERNEL_DIR) && cargo bootimage
+kernel-target-spec:
+	bash scripts/generate-rust-target.sh "$(KERNEL_TARGET_SPEC)"
+	cd $(KERNEL_DIR) && PATH="$(CARGO_PATH)" cargo fetch --target ../$(KERNEL_TARGET_SPEC)
+	bash scripts/patch-bootloader-target.sh "$(KERNEL_TARGET_SPEC)"
+
+kernel-build: userland-bin kernel-target-spec
+	cd $(KERNEL_DIR) && PATH="$(CARGO_PATH)" CARGO_TARGET_DIR=../$(KERNEL_TARGET_DIR) cargo bootimage --target ../$(KERNEL_TARGET_SPEC)
 	bash scripts/generate-artifact-manifest.sh
 
 artifact-manifest: kernel-build
@@ -288,7 +296,7 @@ ci:
 # Cleanup
 
 kernel-clean:
-	cd $(KERNEL_DIR) && cargo clean
+	cd $(KERNEL_DIR) && PATH="$(CARGO_PATH)" CARGO_TARGET_DIR=../$(KERNEL_TARGET_DIR) cargo clean
 
 userland-clean:
 	rm -rf $(USERLAND_BIN_DIR)

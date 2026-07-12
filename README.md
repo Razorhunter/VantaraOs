@@ -50,7 +50,7 @@ make kernel-build
 The boot image is generated at:
 
 ```text
-kernel/target/x86_64-vantara_os/debug/bootimage-kernel.bin
+target/kernel/x86_64-vantara_os/debug/bootimage-kernel.bin
 ```
 
 ## Run
@@ -150,9 +150,9 @@ It currently initializes audited MMIO plus 16-entry RX/TX DMA rings; packet
 submission and TX descriptor reclaim are verified with a boot-time Ethernet
 frame. A two-NIC QEMU hub regression also validates RX polling and descriptor
 recycling. Ethernet II encoding, parsing, and EtherType dispatch are complete;
-ARP resolution plus checksummed IPv4 and UDP delivery into a bounded kernel
-socket queue are covered by the two-NIC QEMU regression. User socket syscalls,
-general UDP send, and TCP remain pending.
+ARP resolution plus checksummed IPv4 and UDP send/receive through bounded kernel
+sockets are covered by the two-NIC QEMU regression. User socket syscalls and TCP
+remain pending.
 `command-smoke` boots an isolated QEMU guest for each of `ls`, `cat`, `procs`,
 and `rusthello`, then compares its serial output with stable golden snippets.
 `preemption-test` proves that a CPU-bound background process which never calls

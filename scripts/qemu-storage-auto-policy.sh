@@ -5,11 +5,10 @@ ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 CARGO_TARGET_DIR="${ROOT_DIR}/target/storage-auto-cargo"
 BOOTIMAGE="${CARGO_TARGET_DIR}/x86_64-vantara_os/debug/bootimage-kernel.bin"
 
-(
-  cd "${ROOT_DIR}/kernel"
-  CARGO_TARGET_DIR="${CARGO_TARGET_DIR}" \
-    cargo bootimage --no-default-features --features storage-auto
-)
+bash "${ROOT_DIR}/scripts/build-kernel-variant.sh" \
+  "${CARGO_TARGET_DIR}" \
+  --no-default-features \
+  --features storage-auto
 
 BOOTIMAGE_OVERRIDE="${BOOTIMAGE}" \
 PERSIST_IMAGE_OVERRIDE="${ROOT_DIR}/target/vantara-storage-auto-nvme.img" \
@@ -53,11 +52,10 @@ cp "${ROOT_DIR}/target/qemu-filesystem-persistence-second.log" \
 
 STRICT_TARGET_DIR="${ROOT_DIR}/target/storage-ata-cargo"
 STRICT_BOOTIMAGE="${STRICT_TARGET_DIR}/x86_64-vantara_os/debug/bootimage-kernel.bin"
-(
-  cd "${ROOT_DIR}/kernel"
-  CARGO_TARGET_DIR="${STRICT_TARGET_DIR}" \
-    cargo bootimage --no-default-features --features storage-ata
-)
+bash "${ROOT_DIR}/scripts/build-kernel-variant.sh" \
+  "${STRICT_TARGET_DIR}" \
+  --no-default-features \
+  --features storage-ata
 BOOTIMAGE_OVERRIDE="${STRICT_BOOTIMAGE}" \
 PERSIST_IMAGE_OVERRIDE="${ROOT_DIR}/target/vantara-storage-strict-ata.img" \
 QEMU_MACHINE= \

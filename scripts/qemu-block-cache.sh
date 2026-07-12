@@ -2,7 +2,7 @@
 set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-BOOTIMAGE="${ROOT_DIR}/kernel/target/x86_64-vantara_os/debug/bootimage-kernel.bin"
+BOOTIMAGE="${ROOT_DIR}/target/kernel/x86_64-vantara_os/debug/bootimage-kernel.bin"
 DISK_IMAGE="${ROOT_DIR}/target/vantara-block-cache-test.img"
 LOG_FILE="${ROOT_DIR}/target/qemu-block-cache.log"
 MONITOR_LOG="${ROOT_DIR}/target/qemu-block-cache-monitor.log"

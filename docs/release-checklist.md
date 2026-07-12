@@ -43,7 +43,7 @@ make package-test
 - [ ] Confirm these files exist:
 
 ```text
-kernel/target/x86_64-vantara_os/debug/bootimage-kernel.bin
+target/kernel/x86_64-vantara_os/debug/bootimage-kernel.bin
 target/generated/build-metadata.tsv
 target/generated/userland_images.rs
 target/artifact-manifest.tsv

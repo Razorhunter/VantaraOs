@@ -75,6 +75,10 @@ pub enum UdpSocketError {
     SocketLimit,
     InvalidHandle,
     WouldBlock,
+    PayloadTooLarge,
+    NoRoute,
+    ArpUnresolved,
+    TransmitFailed,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -165,6 +169,14 @@ impl UdpSocketTable {
             return Err(UdpSocketError::WouldBlock);
         }
         Ok(socket.queue.remove(0))
+    }
+
+    fn local_port(&self, handle: UdpSocketHandle) -> Result<u16, UdpSocketError> {
+        self.sockets
+            .iter()
+            .find(|socket| socket.handle == handle)
+            .map(|socket| socket.local_port)
+            .ok_or(UdpSocketError::InvalidHandle)
     }
 
     fn close(&mut self, handle: UdpSocketHandle) -> Result<(), UdpSocketError> {
@@ -519,6 +531,7 @@ pub struct NetworkDevice {
     pub udp_checksum_valid: bool,
     pub last_udp_source_port: u16,
     pub last_udp_destination_port: u16,
+    pub udp_send_ok: bool,
     pub udp_socket_delivered: bool,
     mmio_base: u64,
     physical_memory_offset: u64,
@@ -603,6 +616,31 @@ pub fn udp_close(handle: UdpSocketHandle) -> Result<(), UdpSocketError> {
     UDP_SOCKETS.lock().close(handle)
 }
 
+pub fn udp_send_to(
+    handle: UdpSocketHandle,
+    destination_ip: [u8; 4],
+    destination_port: u16,
+    payload: &[u8],
+) -> Result<(), UdpSocketError> {
+    let source_port = UDP_SOCKETS.lock().local_port(handle)?;
+    let mut devices = DEVICES.lock();
+    let device = devices
+        .iter_mut()
+        .find(|device| {
+            device.driver != DriverCandidate::Unsupported
+                && device.tx_queue_ready
+                && device.ipv4_address != [0; 4]
+        })
+        .ok_or(UdpSocketError::NoRoute)?;
+    submit_udp_datagram(
+        device,
+        destination_ip,
+        source_port,
+        destination_port,
+        payload,
+    )
+}
+
 pub fn init(
     mapper: &mut impl Mapper<Size4KiB>,
     frame_allocator: &mut impl FrameAllocator<Size4KiB>,
@@ -663,6 +701,7 @@ pub fn init(
                 udp_checksum_valid: false,
                 last_udp_source_port: 0,
                 last_udp_destination_port: 0,
+                udp_send_ok: false,
                 udp_socket_delivered: false,
                 mmio_base: 0,
                 physical_memory_offset: physical_memory_offset.as_u64(),
@@ -729,7 +768,8 @@ pub fn init(
         .collect();
 
     let mut devices = devices;
-    let udp_test_socket = udp_bind(UDP_TEST_DESTINATION_PORT).ok();
+    let udp_receive_socket = udp_bind(UDP_TEST_DESTINATION_PORT).ok();
+    let udp_send_socket = udp_bind(UDP_TEST_SOURCE_PORT).ok();
     for device in &mut devices {
         poll_receive(device);
     }
@@ -738,9 +778,18 @@ pub fn init(
         submit_arp_request(&mut devices[0], target_ip);
         poll_receive(&mut devices[1]);
         poll_receive(&mut devices[0]);
-        submit_udp_test(&mut devices[0], target_ip);
+        if let Some(handle) = udp_send_socket {
+            let _ = submit_udp_from_socket(
+                &mut devices[0],
+                handle,
+                target_ip,
+                UDP_TEST_DESTINATION_PORT,
+                UDP_TEST_PAYLOAD,
+            );
+            let _ = udp_close(handle);
+        }
         poll_receive(&mut devices[1]);
-        if let Some(handle) = udp_test_socket
+        if let Some(handle) = udp_receive_socket
             && let Ok(datagram) = udp_receive(handle)
         {
             devices[1].udp_socket_delivered = datagram.source_ip == devices[0].ipv4_address
@@ -775,7 +824,7 @@ pub fn init(
 
     for device in &devices {
         crate::serial_println!(
-            "[NET] {:02x}:{:02x}.{} vendor={:04x} device={:04x} kind={:?} driver={:?} bar0={:#x} mmio_ready={} ctrl={:#010x} status={:#010x} link_up={} mac={:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x} mac_valid={} rxq={} txq={} depth={} tx_test={} tx_packets={} rx_test={} rx_packets={} ethernet_frames={} ether_type={:#06x} protocol={} ip={}.{}.{}.{} arp_requests={} arp_replies={} arp_resolved={} ipv4_packets={} ipv4_checksum={} ipv4_source={}.{}.{}.{} ipv4_destination={}.{}.{}.{} ipv4_protocol={} udp_packets={} udp_checksum={} udp_source_port={} udp_destination_port={} udp_socket_delivered={}",
+            "[NET] {:02x}:{:02x}.{} vendor={:04x} device={:04x} kind={:?} driver={:?} bar0={:#x} mmio_ready={} ctrl={:#010x} status={:#010x} link_up={} mac={:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x} mac_valid={} rxq={} txq={} depth={} tx_test={} tx_packets={} rx_test={} rx_packets={} ethernet_frames={} ether_type={:#06x} protocol={} ip={}.{}.{}.{} arp_requests={} arp_replies={} arp_resolved={} ipv4_packets={} ipv4_checksum={} ipv4_source={}.{}.{}.{} ipv4_destination={}.{}.{}.{} ipv4_protocol={} udp_packets={} udp_checksum={} udp_source_port={} udp_destination_port={} udp_send_ok={} udp_socket_delivered={}",
             device.pci.bus,
             device.pci.slot,
             device.pci.function,
@@ -827,6 +876,7 @@ pub fn init(
             device.udp_checksum_valid,
             device.last_udp_source_port,
             device.last_udp_destination_port,
+            device.udp_send_ok,
             device.udp_socket_delivered
         );
     }
@@ -1061,34 +1111,64 @@ fn poll_receive(device: &mut NetworkDevice) {
     }
 }
 
-fn submit_udp_test(device: &mut NetworkDevice, destination_ip: [u8; 4]) -> bool {
+fn submit_udp_from_socket(
+    device: &mut NetworkDevice,
+    handle: UdpSocketHandle,
+    destination_ip: [u8; 4],
+    destination_port: u16,
+    payload: &[u8],
+) -> Result<(), UdpSocketError> {
+    let source_port = UDP_SOCKETS.lock().local_port(handle)?;
+    submit_udp_datagram(
+        device,
+        destination_ip,
+        source_port,
+        destination_port,
+        payload,
+    )
+}
+
+fn submit_udp_datagram(
+    device: &mut NetworkDevice,
+    destination_ip: [u8; 4],
+    source_port: u16,
+    destination_port: u16,
+    payload: &[u8],
+) -> Result<(), UdpSocketError> {
+    if source_port == 0 || destination_port == 0 {
+        return Err(UdpSocketError::InvalidPort);
+    }
     let Some((cached_ip, destination_mac)) = device.arp_cache else {
-        return false;
+        return Err(UdpSocketError::ArpUnresolved);
     };
     if cached_ip != destination_ip {
-        return false;
+        return Err(UdpSocketError::ArpUnresolved);
     }
     let mut datagram = [0; UDP_MAX_DATAGRAM_SIZE];
-    let Ok(datagram_len) = encode_udp_datagram(
+    let datagram_len = encode_udp_datagram(
         &mut datagram,
         device.ipv4_address,
         destination_ip,
-        UDP_TEST_SOURCE_PORT,
-        UDP_TEST_DESTINATION_PORT,
-        UDP_TEST_PAYLOAD,
-    ) else {
-        return false;
-    };
+        source_port,
+        destination_port,
+        payload,
+    )
+    .map_err(|error| match error {
+        UdpError::PayloadTooLarge => UdpSocketError::PayloadTooLarge,
+        _ => UdpSocketError::TransmitFailed,
+    })?;
     let mut packet = [0; IPV4_MAX_PACKET_SIZE];
-    let Ok(packet_len) = encode_ipv4_packet(
+    let packet_len = encode_ipv4_packet(
         &mut packet,
         device.ipv4_address,
         destination_ip,
         IP_PROTOCOL_UDP,
         &datagram[..datagram_len],
-    ) else {
-        return false;
-    };
+    )
+    .map_err(|error| match error {
+        Ipv4Error::PayloadTooLarge => UdpSocketError::PayloadTooLarge,
+        _ => UdpSocketError::TransmitFailed,
+    })?;
     let mut frame = [0; ETHERNET_MIN_FRAME_SIZE];
     if encode_ethernet_frame(
         &mut frame,
@@ -1099,10 +1179,10 @@ fn submit_udp_test(device: &mut NetworkDevice, destination_ip: [u8; 4]) -> bool 
     )
     .is_err()
     {
-        return false;
+        return Err(UdpSocketError::TransmitFailed);
     }
     let Some(queues) = device.queues.as_mut() else {
-        return false;
+        return Err(UdpSocketError::NoRoute);
     };
     let sent = submit_frame(
         E1000Mmio {
@@ -1114,8 +1194,11 @@ fn submit_udp_test(device: &mut NetworkDevice, destination_ip: [u8; 4]) -> bool 
     );
     if sent {
         device.tx_packets = device.tx_packets.saturating_add(1);
+        device.udp_send_ok = true;
+        Ok(())
+    } else {
+        Err(UdpSocketError::TransmitFailed)
     }
-    sent
 }
 
 fn submit_arp_request(device: &mut NetworkDevice, target_ip: [u8; 4]) {
@@ -1249,7 +1332,7 @@ pub fn write_devices_to_buffer(out: &mut [u8]) -> usize {
     writer.write_dec(devices.len() as u64);
     writer.write_byte(b'\n');
     writer.write_str(
-        "BDF       VENDOR:DEVICE TYPE      DRIVER       BAR0             MMIO LINK MAC               RXQ TXQ DEPTH TXOK TXPACKETS RXOK RXPACKETS ETHFRAMES ETHERTYPE PROTOCOL IP ARPREQ ARPREPLY RESOLVED IPV4 CHECKSUM SOURCE DESTINATION IPPROTO UDP UDPCHECK SPORT DPORT SOCKET\n",
+        "BDF       VENDOR:DEVICE TYPE      DRIVER       BAR0             MMIO LINK MAC               RXQ TXQ DEPTH TXOK TXPACKETS RXOK RXPACKETS ETHFRAMES ETHERTYPE PROTOCOL IP ARPREQ ARPREPLY RESOLVED IPV4 CHECKSUM SOURCE DESTINATION IPPROTO UDP UDPCHECK SPORT DPORT UDPSEND SOCKET\n",
     );
 
     for device in devices.iter() {
@@ -1320,6 +1403,8 @@ pub fn write_devices_to_buffer(out: &mut [u8]) -> usize {
         writer.write_dec(device.last_udp_source_port as u64);
         writer.write_byte(b' ');
         writer.write_dec(device.last_udp_destination_port as u64);
+        writer.write_byte(b' ');
+        writer.write_dec(device.udp_send_ok as u64);
         writer.write_byte(b' ');
         writer.write_dec(device.udp_socket_delivered as u64);
         writer.write_byte(b'\n');
@@ -1668,7 +1753,12 @@ mod tests {
             payload_len: 1,
         }));
         assert_eq!(sockets.receive(handle).unwrap().payload[0], 0);
+        assert_eq!(sockets.local_port(handle), Ok(7777));
         sockets.close(handle).unwrap();
         assert_eq!(sockets.receive(handle), Err(UdpSocketError::InvalidHandle));
+        assert_eq!(
+            sockets.local_port(handle),
+            Err(UdpSocketError::InvalidHandle)
+        );
     }
 }

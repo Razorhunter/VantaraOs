@@ -14,11 +14,9 @@ if ! command -v "${QEMU_BIN}" >/dev/null 2>&1; then
   exit 127
 fi
 
-(
-  cd "${ROOT_DIR}/kernel"
-  CARGO_TARGET_DIR="${CARGO_TARGET_DIR}" \
-    cargo bootimage --features kernel-thread-preemption-test
-)
+bash "${ROOT_DIR}/scripts/build-kernel-variant.sh" \
+  "${CARGO_TARGET_DIR}" \
+  --features kernel-thread-preemption-test
 
 rm -f "${LOG_FILE}"
 timeout 20s "${QEMU_BIN}" \

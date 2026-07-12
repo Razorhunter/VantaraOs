@@ -754,6 +754,7 @@ Deferred filesystem hardening:
       - [x] Tambah bounded kernel socket table dengan bind, receive queue, dan close.
       - [x] Dispatch RX datagram kepada socket berdasarkan destination port.
       - [x] Reject duplicate bind dan drop secara terkawal apabila queue penuh.
+      - [x] Tambah kernel UDP send API yang guna bound source port, ARP cache, IPv4, dan Ethernet TX path.
     - [ ] TCP
 - [ ] USB HID dan mass storage.
 - [ ] Graphics mode selepas VGA text:
