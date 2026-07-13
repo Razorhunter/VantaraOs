@@ -93,3 +93,9 @@ The established path now accepts in-order payload, advances the peer sequence,
 and returns a cumulative ACK. The same live regression transfers `TCPDAT`, then
 sends FIN and verifies the passive endpoint acknowledges the consumed FIN and
 moves the bounded connection entry to closed state.
+
+The kernel now exposes bounded TCP socket handles for passive `listen`,
+non-blocking `accept` and `receive`, established-stream `send`, and `close`.
+Accepted connections own a four-entry receive queue, and the live boot path
+consumes `TCPDAT` through this socket API. Active connect and userland syscalls
+remain pending.

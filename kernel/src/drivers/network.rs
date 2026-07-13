@@ -81,6 +81,44 @@ const TCP_TEST_SERVER_PORT: u16 = 8080;
 const TCP_TEST_INITIAL_SEQUENCE: u32 = 100;
 const TCP_TEST_PAYLOAD: &[u8; 6] = b"TCPDAT";
 const TCP_MAX_PAYLOAD_SIZE: usize = TCP_MAX_SEGMENT_SIZE - TCP_MIN_HEADER_SIZE;
+const TCP_RECEIVE_QUEUE_DEPTH: usize = 4;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TcpSocketHandle(u16);
+
+impl TcpSocketHandle {
+    pub fn from_raw(raw: u64) -> Result<Self, TcpSocketError> {
+        if raw == 0 || raw > u64::from(u16::MAX) {
+            return Err(TcpSocketError::InvalidHandle);
+        }
+        Ok(Self(raw as u16))
+    }
+
+    pub fn as_raw(self) -> u64 {
+        u64::from(self.0)
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TcpSocketError {
+    InvalidPort,
+    AddressInUse,
+    SocketLimit,
+    InvalidHandle,
+    WouldBlock,
+    NotConnected,
+    PayloadTooLarge,
+    NoRoute,
+    TransmitFailed,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ReceivedTcpData {
+    pub remote_ip: [u8; 4],
+    pub remote_port: u16,
+    pub payload: [u8; TCP_MAX_PAYLOAD_SIZE],
+    pub payload_len: u8,
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum UdpSocketError {
@@ -399,14 +437,32 @@ enum TcpConnectionState {
     Closed,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 struct TcpConnection {
+    handle: TcpSocketHandle,
     remote_ip: [u8; 4],
     remote_port: u16,
     local_port: u16,
     local_next_sequence: u32,
     remote_next_sequence: u32,
     state: TcpConnectionState,
+    accepted: bool,
+    receive_queue: Vec<ReceivedTcpData>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct TcpListener {
+    handle: TcpSocketHandle,
+    local_port: u16,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct TcpSendInfo {
+    remote_ip: [u8; 4],
+    remote_port: u16,
+    local_port: u16,
+    sequence_number: u32,
+    acknowledgment_number: u32,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -425,8 +481,6 @@ enum TcpControlAction {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum TcpConnectionError {
-    InvalidPort,
-    AddressInUse,
     ConnectionLimit,
     NotListening,
     InvalidHandshake,
@@ -434,9 +488,10 @@ enum TcpConnectionError {
 
 #[derive(Debug)]
 struct TcpConnectionTable {
-    listeners: Vec<u16>,
+    listeners: Vec<TcpListener>,
     connections: Vec<TcpConnection>,
     next_initial_sequence: u32,
+    next_handle: u16,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -471,21 +526,106 @@ impl TcpConnectionTable {
             listeners: Vec::new(),
             connections: Vec::new(),
             next_initial_sequence: 0x5641_4e54,
+            next_handle: 1,
         }
     }
 
-    fn listen(&mut self, local_port: u16) -> Result<(), TcpConnectionError> {
+    fn allocate_handle(&mut self) -> TcpSocketHandle {
+        let handle = TcpSocketHandle(self.next_handle);
+        self.next_handle = self.next_handle.wrapping_add(1).max(1);
+        handle
+    }
+
+    fn listen(&mut self, local_port: u16) -> Result<TcpSocketHandle, TcpSocketError> {
         if local_port == 0 {
-            return Err(TcpConnectionError::InvalidPort);
+            return Err(TcpSocketError::InvalidPort);
         }
-        if self.listeners.contains(&local_port) {
-            return Err(TcpConnectionError::AddressInUse);
+        if self.listeners.iter().any(|listener| listener.local_port == local_port) {
+            return Err(TcpSocketError::AddressInUse);
         }
         if self.listeners.len() >= TCP_CONNECTION_LIMIT {
-            return Err(TcpConnectionError::ConnectionLimit);
+            return Err(TcpSocketError::SocketLimit);
         }
-        self.listeners.push(local_port);
+        let handle = self.allocate_handle();
+        self.listeners.push(TcpListener { handle, local_port });
+        Ok(handle)
+    }
+
+    fn accept(&mut self, listener: TcpSocketHandle) -> Result<TcpSocketHandle, TcpSocketError> {
+        let local_port = self
+            .listeners
+            .iter()
+            .find(|entry| entry.handle == listener)
+            .map(|entry| entry.local_port)
+            .ok_or(TcpSocketError::InvalidHandle)?;
+        let connection = self
+            .connections
+            .iter_mut()
+            .find(|entry| {
+                entry.local_port == local_port
+                    && entry.state == TcpConnectionState::Established
+                    && !entry.accepted
+            })
+            .ok_or(TcpSocketError::WouldBlock)?;
+        connection.accepted = true;
+        Ok(connection.handle)
+    }
+
+    fn receive(&mut self, handle: TcpSocketHandle) -> Result<ReceivedTcpData, TcpSocketError> {
+        let connection = self
+            .connections
+            .iter_mut()
+            .find(|entry| entry.handle == handle && entry.accepted)
+            .ok_or(TcpSocketError::InvalidHandle)?;
+        if connection.receive_queue.is_empty() {
+            return Err(TcpSocketError::WouldBlock);
+        }
+        Ok(connection.receive_queue.remove(0))
+    }
+
+    fn close(&mut self, handle: TcpSocketHandle) -> Result<(), TcpSocketError> {
+        if let Some(index) = self.listeners.iter().position(|entry| entry.handle == handle) {
+            let port = self.listeners.remove(index).local_port;
+            self.connections.retain(|entry| entry.local_port != port);
+            return Ok(());
+        }
+        let index = self
+            .connections
+            .iter()
+            .position(|entry| entry.handle == handle)
+            .ok_or(TcpSocketError::InvalidHandle)?;
+        self.connections.remove(index);
         Ok(())
+    }
+
+    fn send_info(&self, handle: TcpSocketHandle) -> Result<TcpSendInfo, TcpSocketError> {
+        let connection = self
+            .connections
+            .iter()
+            .find(|entry| entry.handle == handle && entry.accepted)
+            .ok_or(TcpSocketError::InvalidHandle)?;
+        if connection.state != TcpConnectionState::Established {
+            return Err(TcpSocketError::NotConnected);
+        }
+        Ok(TcpSendInfo {
+            remote_ip: connection.remote_ip,
+            remote_port: connection.remote_port,
+            local_port: connection.local_port,
+            sequence_number: connection.local_next_sequence,
+            acknowledgment_number: connection.remote_next_sequence,
+        })
+    }
+
+    fn record_sent(&mut self, handle: TcpSocketHandle, length: usize) {
+        if let Some(connection) = self
+            .connections
+            .iter_mut()
+            .find(|entry| entry.handle == handle)
+        {
+            connection.local_next_sequence = connection
+                .local_next_sequence
+                .wrapping_add(length as u32);
+        }
     }
 
     fn process(
@@ -494,7 +634,11 @@ impl TcpConnectionTable {
         segment: TcpSegment<'_>,
     ) -> Result<TcpControlAction, TcpConnectionError> {
         if segment.has_flag(TCP_FLAG_SYN) && !segment.has_flag(TCP_FLAG_ACK) {
-            if !self.listeners.contains(&segment.destination_port) {
+            if !self
+                .listeners
+                .iter()
+                .any(|listener| listener.local_port == segment.destination_port)
+            {
                 return Err(TcpConnectionError::NotListening);
             }
             if self.connections.len() >= TCP_CONNECTION_LIMIT {
@@ -502,13 +646,17 @@ impl TcpConnectionTable {
             }
             let initial_sequence = self.next_initial_sequence;
             self.next_initial_sequence = self.next_initial_sequence.wrapping_add(0x1000);
+            let handle = self.allocate_handle();
             self.connections.push(TcpConnection {
+                handle,
                 remote_ip,
                 remote_port: segment.source_port,
                 local_port: segment.destination_port,
                 local_next_sequence: initial_sequence.wrapping_add(1),
                 remote_next_sequence: segment.sequence_number.wrapping_add(1),
                 state: TcpConnectionState::SynReceived,
+                accepted: false,
+                receive_queue: Vec::new(),
             });
             return Ok(TcpControlAction::SendSynAck {
                 sequence_number: initial_sequence,
@@ -548,6 +696,18 @@ impl TcpConnectionTable {
                 }
                 connection.remote_next_sequence =
                     connection.remote_next_sequence.wrapping_add(consumed);
+                if !segment.payload.is_empty()
+                    && connection.receive_queue.len() < TCP_RECEIVE_QUEUE_DEPTH
+                {
+                    let mut payload = [0; TCP_MAX_PAYLOAD_SIZE];
+                    payload[..segment.payload.len()].copy_from_slice(segment.payload);
+                    connection.receive_queue.push(ReceivedTcpData {
+                        remote_ip,
+                        remote_port: segment.source_port,
+                        payload,
+                        payload_len: segment.payload.len() as u8,
+                    });
+                }
                 let action = TcpControlAction::SendAck {
                     sequence_number: connection.local_next_sequence,
                     acknowledgment_number: connection.remote_next_sequence,
@@ -924,6 +1084,51 @@ pub fn udp_close(handle: UdpSocketHandle) -> Result<(), UdpSocketError> {
     UDP_SOCKETS.lock().close(handle)
 }
 
+pub fn tcp_listen(local_port: u16) -> Result<TcpSocketHandle, TcpSocketError> {
+    TCP_CONNECTIONS.lock().listen(local_port)
+}
+
+pub fn tcp_accept(listener: TcpSocketHandle) -> Result<TcpSocketHandle, TcpSocketError> {
+    TCP_CONNECTIONS.lock().accept(listener)
+}
+
+pub fn tcp_receive(handle: TcpSocketHandle) -> Result<ReceivedTcpData, TcpSocketError> {
+    TCP_CONNECTIONS.lock().receive(handle)
+}
+
+pub fn tcp_send(handle: TcpSocketHandle, payload: &[u8]) -> Result<usize, TcpSocketError> {
+    if payload.is_empty() || payload.len() > TCP_MAX_PAYLOAD_SIZE {
+        return Err(TcpSocketError::PayloadTooLarge);
+    }
+    let info = TCP_CONNECTIONS.lock().send_info(handle)?;
+    let sent = {
+        let mut devices = DEVICES.lock();
+        let device = devices
+            .iter_mut()
+            .find(|device| device.arp_cache.is_some_and(|(ip, _)| ip == info.remote_ip))
+            .ok_or(TcpSocketError::NoRoute)?;
+        submit_tcp_segment(
+            device,
+            info.remote_ip,
+            info.local_port,
+            info.remote_port,
+            info.sequence_number,
+            info.acknowledgment_number,
+            TCP_FLAG_PSH | TCP_FLAG_ACK,
+            payload,
+        )
+    };
+    if !sent {
+        return Err(TcpSocketError::TransmitFailed);
+    }
+    TCP_CONNECTIONS.lock().record_sent(handle, payload.len());
+    Ok(payload.len())
+}
+
+pub fn tcp_close(handle: TcpSocketHandle) -> Result<(), TcpSocketError> {
+    TCP_CONNECTIONS.lock().close(handle)
+}
+
 pub fn udp_send_to(
     handle: UdpSocketHandle,
     destination_ip: [u8; 4],
@@ -1098,7 +1303,7 @@ pub fn init(
     let mut devices = devices;
     let udp_receive_socket = udp_bind(UDP_TEST_DESTINATION_PORT).ok();
     let udp_send_socket = udp_bind(UDP_TEST_SOURCE_PORT).ok();
-    let _ = TCP_CONNECTIONS.lock().listen(TCP_TEST_SERVER_PORT);
+    let tcp_test_listener = tcp_listen(TCP_TEST_SERVER_PORT).ok();
     for device in &mut devices {
         poll_receive(device);
     }
@@ -1140,6 +1345,7 @@ pub fn init(
             poll_receive(&mut devices[1]);
             poll_receive(&mut devices[0]);
             poll_receive(&mut devices[1]);
+            let tcp_test_connection = tcp_test_listener.and_then(|listener| tcp_accept(listener).ok());
             let server_next_sequence = 0x5641_4e55;
             if submit_tcp_segment(
                 &mut devices[0],
@@ -1153,6 +1359,14 @@ pub fn init(
             ) {
                 poll_receive(&mut devices[1]);
                 poll_receive(&mut devices[0]);
+                if let Some(connection) = tcp_test_connection
+                    && let Ok(data) = tcp_receive(connection)
+                {
+                    devices[1].tcp_data_acked =
+                        data.remote_ip == devices[0].ipv4_address
+                            && data.remote_port == TCP_TEST_CLIENT_PORT
+                            && data.payload[..usize::from(data.payload_len)] == *TCP_TEST_PAYLOAD;
+                }
             }
             if submit_tcp_segment(
                 &mut devices[0],
@@ -1166,6 +1380,12 @@ pub fn init(
             ) {
                 poll_receive(&mut devices[1]);
                 poll_receive(&mut devices[0]);
+            }
+            if let Some(connection) = tcp_test_connection {
+                let _ = tcp_close(connection);
+            }
+            if let Some(listener) = tcp_test_listener {
+                let _ = tcp_close(listener);
             }
         }
     }
@@ -2113,7 +2333,7 @@ mod tests {
         Ipv4Error, Ipv4Packet, NetworkKind, ReceivedUdpDatagram, UDP_MAX_DATAGRAM_SIZE,
         UDP_SOCKET_QUEUE_DEPTH, UdpDatagram, UdpError, UdpSocketError, UdpSocketTable,
         TCP_FLAG_ACK, TCP_FLAG_SYN, TCP_MAX_SEGMENT_SIZE, TcpError, TcpSegment, driver_name,
-        TcpConnectionError, TcpConnectionTable, TcpControlAction,
+        TcpConnectionTable, TcpControlAction, TcpSocketError,
         encode_ethernet_frame, encode_ipv4_packet, encode_tcp_segment, encode_udp_datagram,
         kind_name, protocol_name,
     };
@@ -2368,7 +2588,7 @@ mod tests {
         let server_ip = [10, 0, 2, 16];
         let mut table = TcpConnectionTable::new();
         table.listen(8080).unwrap();
-        assert_eq!(table.listen(8080), Err(TcpConnectionError::AddressInUse));
+        assert_eq!(table.listen(8080), Err(TcpSocketError::AddressInUse));
 
         let mut bytes = [0; TCP_MAX_SEGMENT_SIZE];
         let length = encode_tcp_segment(
