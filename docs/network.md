@@ -78,5 +78,10 @@ every runtime wake-up. Each pass is bounded to one descriptor-ring traversal
 per device and never spin-waits for a packet. This lets datagrams that arrive
 after boot reach a user socket while normal processes are running.
 
-The e1000 NIC-driver, Ethernet, ARP, IPv4, UDP, and kernel receive-socket
-baselines are complete. TCP remains pending.
+The TCP wire-format foundation now encodes and parses minimum TCP headers,
+sequence and acknowledgment numbers, control flags, receive windows, payloads,
+and the IPv4 pseudo-header checksum. Malformed header lengths, reserved port
+zero, oversized payloads, and invalid checksums are rejected. A bounded passive
+connection table validates the `LISTEN -> SYN-RECEIVED -> ESTABLISHED` state
+transitions and sequence/acknowledgment numbers. Wiring those actions to live
+two-NIC frame transmission remains pending.

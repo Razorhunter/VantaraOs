@@ -759,6 +759,11 @@ Deferred filesystem hardening:
       - [x] Tambah `/bin/udpdemo` command smoke untuk validate UDP syscall ABI surface.
       - [x] Poll RX semasa runtime dan buktikan live UDP delivery kepada proses userland.
     - [ ] TCP
+      - [x] Encode dan parse minimum TCP header, sequence/ack numbers, flags, window, dan payload.
+      - [x] Generate dan validate TCP checksum menggunakan IPv4 pseudo-header.
+      - [x] Reject malformed header length, invalid port, oversized payload, dan invalid checksum.
+      - [x] Implement bounded connection table dan state machine SYN/SYN-ACK/ACK.
+      - [ ] Buktikan TCP handshake melalui dua NIC QEMU.
 - [ ] USB HID dan mass storage.
 - [ ] Graphics mode selepas VGA text:
   - [ ] framebuffer

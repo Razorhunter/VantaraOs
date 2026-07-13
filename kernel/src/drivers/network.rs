@@ -59,6 +59,7 @@ const ARP_OPERATION_REPLY: u16 = 2;
 const IPV4_MIN_HEADER_SIZE: usize = 20;
 const IPV4_MAX_PACKET_SIZE: usize = ETHERNET_MIN_FRAME_SIZE - ETHERNET_HEADER_SIZE;
 const IP_PROTOCOL_UDP: u8 = 17;
+const IP_PROTOCOL_TCP: u8 = 6;
 const UDP_HEADER_SIZE: usize = 8;
 const UDP_MAX_DATAGRAM_SIZE: usize = IPV4_MAX_PACKET_SIZE - IPV4_MIN_HEADER_SIZE;
 const UDP_TEST_SOURCE_PORT: u16 = 40000;
@@ -67,6 +68,14 @@ const UDP_TEST_PAYLOAD: &[u8; 13] = b"VANTARA_UDPV1";
 const UDP_MAX_PAYLOAD_SIZE: usize = UDP_MAX_DATAGRAM_SIZE - UDP_HEADER_SIZE;
 const UDP_SOCKET_LIMIT: usize = 8;
 const UDP_SOCKET_QUEUE_DEPTH: usize = 4;
+const TCP_MIN_HEADER_SIZE: usize = 20;
+const TCP_MAX_SEGMENT_SIZE: usize = IPV4_MAX_PACKET_SIZE - IPV4_MIN_HEADER_SIZE;
+const TCP_FLAG_FIN: u16 = 1 << 0;
+const TCP_FLAG_SYN: u16 = 1 << 1;
+const TCP_FLAG_RST: u16 = 1 << 2;
+const TCP_FLAG_PSH: u16 = 1 << 3;
+const TCP_FLAG_ACK: u16 = 1 << 4;
+const TCP_CONNECTION_LIMIT: usize = 8;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum UdpSocketError {
@@ -273,6 +282,223 @@ fn encode_udp_datagram(
     let checksum = udp_checksum(source_ip, destination_ip, &out[..length]);
     out[6..8].copy_from_slice(&if checksum == 0 { u16::MAX } else { checksum }.to_be_bytes());
     Ok(length)
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TcpError {
+    SegmentTooShort,
+    InvalidPort,
+    InvalidHeaderLength,
+    InvalidChecksum,
+    PayloadTooLarge,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TcpSegment<'a> {
+    pub source_port: u16,
+    pub destination_port: u16,
+    pub sequence_number: u32,
+    pub acknowledgment_number: u32,
+    pub flags: u16,
+    pub window_size: u16,
+    pub payload: &'a [u8],
+}
+
+impl<'a> TcpSegment<'a> {
+    pub fn parse(
+        source_ip: [u8; 4],
+        destination_ip: [u8; 4],
+        bytes: &'a [u8],
+    ) -> Result<Self, TcpError> {
+        if bytes.len() < TCP_MIN_HEADER_SIZE {
+            return Err(TcpError::SegmentTooShort);
+        }
+        let source_port = u16::from_be_bytes([bytes[0], bytes[1]]);
+        let destination_port = u16::from_be_bytes([bytes[2], bytes[3]]);
+        if source_port == 0 || destination_port == 0 {
+            return Err(TcpError::InvalidPort);
+        }
+        let header_length = usize::from(bytes[12] >> 4) * 4;
+        if header_length < TCP_MIN_HEADER_SIZE || header_length > bytes.len() {
+            return Err(TcpError::InvalidHeaderLength);
+        }
+        if tcp_checksum(source_ip, destination_ip, bytes) != 0 {
+            return Err(TcpError::InvalidChecksum);
+        }
+        Ok(Self {
+            source_port,
+            destination_port,
+            sequence_number: u32::from_be_bytes([bytes[4], bytes[5], bytes[6], bytes[7]]),
+            acknowledgment_number: u32::from_be_bytes([
+                bytes[8], bytes[9], bytes[10], bytes[11],
+            ]),
+            flags: u16::from_be_bytes([bytes[12] & 1, bytes[13]]),
+            window_size: u16::from_be_bytes([bytes[14], bytes[15]]),
+            payload: &bytes[header_length..],
+        })
+    }
+
+    pub fn has_flag(self, flag: u16) -> bool {
+        self.flags & flag != 0
+    }
+}
+
+fn tcp_checksum(source_ip: [u8; 4], destination_ip: [u8; 4], segment: &[u8]) -> u16 {
+    let mut bytes = [0u8; 12 + TCP_MAX_SEGMENT_SIZE];
+    bytes[..4].copy_from_slice(&source_ip);
+    bytes[4..8].copy_from_slice(&destination_ip);
+    bytes[9] = IP_PROTOCOL_TCP;
+    bytes[10..12].copy_from_slice(&(segment.len() as u16).to_be_bytes());
+    bytes[12..12 + segment.len()].copy_from_slice(segment);
+    internet_checksum(&bytes[..12 + segment.len()])
+}
+
+#[allow(clippy::too_many_arguments)]
+fn encode_tcp_segment(
+    out: &mut [u8; TCP_MAX_SEGMENT_SIZE],
+    source_ip: [u8; 4],
+    destination_ip: [u8; 4],
+    source_port: u16,
+    destination_port: u16,
+    sequence_number: u32,
+    acknowledgment_number: u32,
+    flags: u16,
+    window_size: u16,
+    payload: &[u8],
+) -> Result<usize, TcpError> {
+    if source_port == 0 || destination_port == 0 {
+        return Err(TcpError::InvalidPort);
+    }
+    let length = TCP_MIN_HEADER_SIZE + payload.len();
+    if length > out.len() {
+        return Err(TcpError::PayloadTooLarge);
+    }
+    out.fill(0);
+    out[..2].copy_from_slice(&source_port.to_be_bytes());
+    out[2..4].copy_from_slice(&destination_port.to_be_bytes());
+    out[4..8].copy_from_slice(&sequence_number.to_be_bytes());
+    out[8..12].copy_from_slice(&acknowledgment_number.to_be_bytes());
+    out[12] = (5 << 4) | ((flags >> 8) as u8 & 1);
+    out[13] = flags as u8;
+    out[14..16].copy_from_slice(&window_size.to_be_bytes());
+    out[TCP_MIN_HEADER_SIZE..length].copy_from_slice(payload);
+    let checksum = tcp_checksum(source_ip, destination_ip, &out[..length]);
+    out[16..18].copy_from_slice(&checksum.to_be_bytes());
+    Ok(length)
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TcpConnectionState {
+    SynReceived,
+    Established,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct TcpConnection {
+    remote_ip: [u8; 4],
+    remote_port: u16,
+    local_port: u16,
+    local_next_sequence: u32,
+    remote_next_sequence: u32,
+    state: TcpConnectionState,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TcpControlAction {
+    SendSynAck {
+        sequence_number: u32,
+        acknowledgment_number: u32,
+    },
+    Established,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TcpConnectionError {
+    InvalidPort,
+    AddressInUse,
+    ConnectionLimit,
+    NotListening,
+    InvalidHandshake,
+}
+
+#[derive(Debug)]
+struct TcpConnectionTable {
+    listeners: Vec<u16>,
+    connections: Vec<TcpConnection>,
+    next_initial_sequence: u32,
+}
+
+impl TcpConnectionTable {
+    fn new() -> Self {
+        Self {
+            listeners: Vec::new(),
+            connections: Vec::new(),
+            next_initial_sequence: 0x5641_4e54,
+        }
+    }
+
+    fn listen(&mut self, local_port: u16) -> Result<(), TcpConnectionError> {
+        if local_port == 0 {
+            return Err(TcpConnectionError::InvalidPort);
+        }
+        if self.listeners.contains(&local_port) {
+            return Err(TcpConnectionError::AddressInUse);
+        }
+        if self.listeners.len() >= TCP_CONNECTION_LIMIT {
+            return Err(TcpConnectionError::ConnectionLimit);
+        }
+        self.listeners.push(local_port);
+        Ok(())
+    }
+
+    fn process(
+        &mut self,
+        remote_ip: [u8; 4],
+        segment: TcpSegment<'_>,
+    ) -> Result<TcpControlAction, TcpConnectionError> {
+        if segment.has_flag(TCP_FLAG_SYN) && !segment.has_flag(TCP_FLAG_ACK) {
+            if !self.listeners.contains(&segment.destination_port) {
+                return Err(TcpConnectionError::NotListening);
+            }
+            if self.connections.len() >= TCP_CONNECTION_LIMIT {
+                return Err(TcpConnectionError::ConnectionLimit);
+            }
+            let initial_sequence = self.next_initial_sequence;
+            self.next_initial_sequence = self.next_initial_sequence.wrapping_add(0x1000);
+            self.connections.push(TcpConnection {
+                remote_ip,
+                remote_port: segment.source_port,
+                local_port: segment.destination_port,
+                local_next_sequence: initial_sequence.wrapping_add(1),
+                remote_next_sequence: segment.sequence_number.wrapping_add(1),
+                state: TcpConnectionState::SynReceived,
+            });
+            return Ok(TcpControlAction::SendSynAck {
+                sequence_number: initial_sequence,
+                acknowledgment_number: segment.sequence_number.wrapping_add(1),
+            });
+        }
+
+        let connection = self
+            .connections
+            .iter_mut()
+            .find(|connection| {
+                connection.remote_ip == remote_ip
+                    && connection.remote_port == segment.source_port
+                    && connection.local_port == segment.destination_port
+            })
+            .ok_or(TcpConnectionError::InvalidHandshake)?;
+        if connection.state != TcpConnectionState::SynReceived
+            || !segment.has_flag(TCP_FLAG_ACK)
+            || segment.has_flag(TCP_FLAG_SYN | TCP_FLAG_RST | TCP_FLAG_FIN)
+            || segment.sequence_number != connection.remote_next_sequence
+            || segment.acknowledgment_number != connection.local_next_sequence
+        {
+            return Err(TcpConnectionError::InvalidHandshake);
+        }
+        connection.state = TcpConnectionState::Established;
+        Ok(TcpControlAction::Established)
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1575,8 +1801,11 @@ mod tests {
         ETHER_TYPE_ARP, ETHER_TYPE_IPV4, ETHER_TYPE_VANTARA_TEST, ETHERNET_MIN_FRAME_SIZE,
         EthernetError, EthernetFrame, EthernetProtocol, IP_PROTOCOL_UDP, IPV4_MAX_PACKET_SIZE,
         Ipv4Error, Ipv4Packet, NetworkKind, ReceivedUdpDatagram, UDP_MAX_DATAGRAM_SIZE,
-        UDP_SOCKET_QUEUE_DEPTH, UdpDatagram, UdpError, UdpSocketError, UdpSocketTable, driver_name,
-        encode_ethernet_frame, encode_ipv4_packet, encode_udp_datagram, kind_name, protocol_name,
+        UDP_SOCKET_QUEUE_DEPTH, UdpDatagram, UdpError, UdpSocketError, UdpSocketTable,
+        TCP_FLAG_ACK, TCP_FLAG_SYN, TCP_MAX_SEGMENT_SIZE, TcpError, TcpSegment, driver_name,
+        TcpConnectionError, TcpConnectionTable, TcpControlAction,
+        encode_ethernet_frame, encode_ipv4_packet, encode_tcp_segment, encode_udp_datagram,
+        kind_name, protocol_name,
     };
 
     #[test_case]
@@ -1759,6 +1988,110 @@ mod tests {
         assert_eq!(
             encode_udp_datagram(&mut bytes, [1; 4], [2; 4], 1, 2, &[0; 19]),
             Err(UdpError::PayloadTooLarge)
+        );
+    }
+
+    #[test_case]
+    fn encodes_parses_and_checksums_tcp_syn_ack() {
+        let source = [10, 0, 2, 15];
+        let destination = [10, 0, 2, 16];
+        let mut bytes = [0; TCP_MAX_SEGMENT_SIZE];
+        let length = encode_tcp_segment(
+            &mut bytes,
+            source,
+            destination,
+            40000,
+            8080,
+            0x1020_3040,
+            0x5060_7080,
+            TCP_FLAG_SYN | TCP_FLAG_ACK,
+            4096,
+            b"hello",
+        )
+        .unwrap();
+        let segment = TcpSegment::parse(source, destination, &bytes[..length]).unwrap();
+        assert_eq!(segment.source_port, 40000);
+        assert_eq!(segment.destination_port, 8080);
+        assert_eq!(segment.sequence_number, 0x1020_3040);
+        assert_eq!(segment.acknowledgment_number, 0x5060_7080);
+        assert!(segment.has_flag(TCP_FLAG_SYN));
+        assert!(segment.has_flag(TCP_FLAG_ACK));
+        assert_eq!(segment.window_size, 4096);
+        assert_eq!(segment.payload, b"hello");
+    }
+
+    #[test_case]
+    fn rejects_malformed_tcp_segments() {
+        let source = [10, 0, 2, 15];
+        let destination = [10, 0, 2, 16];
+        let mut bytes = [0; TCP_MAX_SEGMENT_SIZE];
+        let length = encode_tcp_segment(
+            &mut bytes, source, destination, 1, 2, 1, 0, TCP_FLAG_SYN, 1024, b"",
+        )
+        .unwrap();
+        bytes[16] ^= 1;
+        assert_eq!(
+            TcpSegment::parse(source, destination, &bytes[..length]),
+            Err(TcpError::InvalidChecksum)
+        );
+
+        let length = encode_tcp_segment(
+            &mut bytes, source, destination, 1, 2, 1, 0, TCP_FLAG_SYN, 1024, b"",
+        )
+        .unwrap();
+        bytes[12] = 4 << 4;
+        assert_eq!(
+            TcpSegment::parse(source, destination, &bytes[..length]),
+            Err(TcpError::InvalidHeaderLength)
+        );
+        assert_eq!(
+            encode_tcp_segment(
+                &mut bytes, source, destination, 0, 2, 1, 0, TCP_FLAG_SYN, 1024, b"",
+            ),
+            Err(TcpError::InvalidPort)
+        );
+    }
+
+    #[test_case]
+    fn completes_bounded_tcp_passive_handshake_state() {
+        let client_ip = [10, 0, 2, 15];
+        let server_ip = [10, 0, 2, 16];
+        let mut table = TcpConnectionTable::new();
+        table.listen(8080).unwrap();
+        assert_eq!(table.listen(8080), Err(TcpConnectionError::AddressInUse));
+
+        let mut bytes = [0; TCP_MAX_SEGMENT_SIZE];
+        let length = encode_tcp_segment(
+            &mut bytes, client_ip, server_ip, 40000, 8080, 100, 0, TCP_FLAG_SYN, 4096, b"",
+        )
+        .unwrap();
+        let syn = TcpSegment::parse(client_ip, server_ip, &bytes[..length]).unwrap();
+        let TcpControlAction::SendSynAck {
+            sequence_number,
+            acknowledgment_number,
+        } = table.process(client_ip, syn).unwrap()
+        else {
+            panic!("SYN must create a SYN-ACK action");
+        };
+        assert_eq!(acknowledgment_number, 101);
+
+        let length = encode_tcp_segment(
+            &mut bytes,
+            client_ip,
+            server_ip,
+            40000,
+            8080,
+            101,
+            sequence_number.wrapping_add(1),
+            TCP_FLAG_ACK,
+            4096,
+            b"",
+        )
+        .unwrap();
+        let ack = TcpSegment::parse(client_ip, server_ip, &bytes[..length]).unwrap();
+        assert_eq!(
+            table.process(client_ip, ack),
+            Ok(TcpControlAction::Established)
         );
     }
 
