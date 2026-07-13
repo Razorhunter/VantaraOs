@@ -432,6 +432,7 @@ fn encode_tcp_segment(
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum TcpConnectionState {
+    SynSent,
     SynReceived,
     Established,
     Closed,
@@ -571,6 +572,52 @@ impl TcpConnectionTable {
         Ok(connection.handle)
     }
 
+    fn connect(
+        &mut self,
+        remote_ip: [u8; 4],
+        remote_port: u16,
+        local_port: u16,
+    ) -> Result<(TcpSocketHandle, TcpSendInfo), TcpSocketError> {
+        if remote_port == 0 || local_port == 0 {
+            return Err(TcpSocketError::InvalidPort);
+        }
+        if self.connections.len() >= TCP_CONNECTION_LIMIT {
+            return Err(TcpSocketError::SocketLimit);
+        }
+        if self.listeners.iter().any(|entry| entry.local_port == local_port)
+            || self
+                .connections
+                .iter()
+                .any(|entry| entry.local_port == local_port)
+        {
+            return Err(TcpSocketError::AddressInUse);
+        }
+        let handle = self.allocate_handle();
+        let initial_sequence = self.next_initial_sequence;
+        self.next_initial_sequence = self.next_initial_sequence.wrapping_add(0x1000);
+        self.connections.push(TcpConnection {
+            handle,
+            remote_ip,
+            remote_port,
+            local_port,
+            local_next_sequence: initial_sequence.wrapping_add(1),
+            remote_next_sequence: 0,
+            state: TcpConnectionState::SynSent,
+            accepted: true,
+            receive_queue: Vec::new(),
+        });
+        Ok((
+            handle,
+            TcpSendInfo {
+                remote_ip,
+                remote_port,
+                local_port,
+                sequence_number: initial_sequence,
+                acknowledgment_number: 0,
+            },
+        ))
+    }
+
     fn receive(&mut self, handle: TcpSocketHandle) -> Result<ReceivedTcpData, TcpSocketError> {
         let connection = self
             .connections
@@ -673,6 +720,19 @@ impl TcpConnectionTable {
                     && connection.local_port == segment.destination_port
             })
             .ok_or(TcpConnectionError::InvalidHandshake)?;
+        if connection.state == TcpConnectionState::SynSent {
+            if segment.flags & (TCP_FLAG_SYN | TCP_FLAG_ACK) != (TCP_FLAG_SYN | TCP_FLAG_ACK)
+                || segment.acknowledgment_number != connection.local_next_sequence
+            {
+                return Err(TcpConnectionError::InvalidHandshake);
+            }
+            connection.remote_next_sequence = segment.sequence_number.wrapping_add(1);
+            connection.state = TcpConnectionState::Established;
+            return Ok(TcpControlAction::SendAck {
+                sequence_number: connection.local_next_sequence,
+                acknowledgment_number: connection.remote_next_sequence,
+            });
+        }
         if !segment.has_flag(TCP_FLAG_ACK)
             || segment.has_flag(TCP_FLAG_SYN | TCP_FLAG_RST)
             || segment.sequence_number != connection.remote_next_sequence
@@ -681,6 +741,7 @@ impl TcpConnectionTable {
             return Err(TcpConnectionError::InvalidHandshake);
         }
         match connection.state {
+            TcpConnectionState::SynSent => Err(TcpConnectionError::InvalidHandshake),
             TcpConnectionState::SynReceived => {
                 if segment.has_flag(TCP_FLAG_FIN) || !segment.payload.is_empty() {
                     return Err(TcpConnectionError::InvalidHandshake);
@@ -1090,6 +1151,42 @@ pub fn tcp_listen(local_port: u16) -> Result<TcpSocketHandle, TcpSocketError> {
 
 pub fn tcp_accept(listener: TcpSocketHandle) -> Result<TcpSocketHandle, TcpSocketError> {
     TCP_CONNECTIONS.lock().accept(listener)
+}
+
+pub fn tcp_connect(
+    destination_ip: [u8; 4],
+    destination_port: u16,
+    local_port: u16,
+) -> Result<TcpSocketHandle, TcpSocketError> {
+    let (handle, info) = TCP_CONNECTIONS
+        .lock()
+        .connect(destination_ip, destination_port, local_port)?;
+    let sent = {
+        let mut devices = DEVICES.lock();
+        let Some(device) = devices
+            .iter_mut()
+            .find(|device| device.arp_cache.is_some_and(|(ip, _)| ip == destination_ip))
+        else {
+            drop(devices);
+            let _ = TCP_CONNECTIONS.lock().close(handle);
+            return Err(TcpSocketError::NoRoute);
+        };
+        submit_tcp_segment(
+            device,
+            destination_ip,
+            info.local_port,
+            info.remote_port,
+            info.sequence_number,
+            0,
+            TCP_FLAG_SYN,
+            &[],
+        )
+    };
+    if !sent {
+        let _ = TCP_CONNECTIONS.lock().close(handle);
+        return Err(TcpSocketError::TransmitFailed);
+    }
+    Ok(handle)
 }
 
 pub fn tcp_receive(handle: TcpSocketHandle) -> Result<ReceivedTcpData, TcpSocketError> {
@@ -2623,6 +2720,38 @@ mod tests {
             table.process(client_ip, ack),
             Ok(TcpControlAction::Established)
         );
+    }
+
+    #[test_case]
+    fn completes_active_tcp_connect_state() {
+        let client_ip = [10, 0, 2, 15];
+        let server_ip = [10, 0, 2, 16];
+        let mut table = TcpConnectionTable::new();
+        let (handle, syn) = table.connect(server_ip, 8080, 40001).unwrap();
+
+        let mut bytes = [0; TCP_MAX_SEGMENT_SIZE];
+        let length = encode_tcp_segment(
+            &mut bytes,
+            server_ip,
+            client_ip,
+            8080,
+            40001,
+            500,
+            syn.sequence_number.wrapping_add(1),
+            TCP_FLAG_SYN | TCP_FLAG_ACK,
+            4096,
+            b"",
+        )
+        .unwrap();
+        let syn_ack = TcpSegment::parse(server_ip, client_ip, &bytes[..length]).unwrap();
+        assert_eq!(
+            table.process(server_ip, syn_ack),
+            Ok(TcpControlAction::SendAck {
+                sequence_number: syn.sequence_number.wrapping_add(1),
+                acknowledgment_number: 501,
+            })
+        );
+        assert!(table.send_info(handle).is_ok());
     }
 
     #[test_case]

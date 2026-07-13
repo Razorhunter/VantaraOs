@@ -767,7 +767,9 @@ Deferred filesystem hardening:
       - [x] Hantar TCP payload selepas established dan validate cumulative ACK.
       - [x] Implement passive FIN close dan buktikan close melalui dua NIC QEMU.
       - [x] Tambah kernel TCP socket handles untuk listen, non-blocking accept/receive, send, dan close.
-      - [ ] Tambah active connect dan expose TCP socket syscalls kepada userland.
+      - [x] Tambah active connect dengan SYN-SENT ke ESTABLISHED transition.
+      - [x] Expose TCP listen, accept, connect, send, receive, dan close syscalls kepada userland.
+      - [x] Tambah `/bin/tcpdemo` dua-NIC smoke untuk validate TCP syscall transfer end-to-end.
 - [ ] USB HID dan mass storage.
 - [ ] Graphics mode selepas VGA text:
   - [ ] framebuffer

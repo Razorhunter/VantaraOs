@@ -45,9 +45,15 @@ ORG USER_BASE
 %define SYS_UDP_SEND_TO   56
 %define SYS_UDP_RECV_FROM 57
 %define SYS_UDP_CLOSE     58
+%define SYS_TCP_LISTEN    59
+%define SYS_TCP_ACCEPT    60
+%define SYS_TCP_CONNECT   61
+%define SYS_TCP_SEND      62
+%define SYS_TCP_RECV      63
+%define SYS_TCP_CLOSE     64
 
 %define ABI_VERSION_MAJOR 1
-%define ABI_VERSION_MINOR 13
+%define ABI_VERSION_MINOR 14
 
 %define ERR_UNKNOWN_SYSCALL -1
 %define ERR_INVALID_ARGUMENT -2

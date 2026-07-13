@@ -59,9 +59,15 @@ pub const SYS_UDP_BIND: u64 = 55;
 pub const SYS_UDP_SEND_TO: u64 = 56;
 pub const SYS_UDP_RECV_FROM: u64 = 57;
 pub const SYS_UDP_CLOSE: u64 = 58;
+pub const SYS_TCP_LISTEN: u64 = 59;
+pub const SYS_TCP_ACCEPT: u64 = 60;
+pub const SYS_TCP_CONNECT: u64 = 61;
+pub const SYS_TCP_SEND: u64 = 62;
+pub const SYS_TCP_RECV: u64 = 63;
+pub const SYS_TCP_CLOSE: u64 = 64;
 
 pub const ABI_VERSION_MAJOR: u64 = 1;
-pub const ABI_VERSION_MINOR: u64 = 13;
+pub const ABI_VERSION_MINOR: u64 = 14;
 pub const ABI_VERSION: u64 = (ABI_VERSION_MAJOR << 32) | ABI_VERSION_MINOR;
 
 pub const ERR_UNKNOWN_SYSCALL: i64 = -1;
@@ -404,6 +410,37 @@ pub fn udp_recv_from(handle: u64, out: &mut [u8], meta: &mut UdpDatagramMeta) ->
 
 pub fn udp_close(handle: u64) -> i64 {
     unsafe { syscall1(SYS_UDP_CLOSE, handle) as i64 }
+}
+
+pub fn tcp_listen(port: u16) -> i64 {
+    unsafe { syscall1(SYS_TCP_LISTEN, port as u64) as i64 }
+}
+
+pub fn tcp_accept(listener: u64) -> i64 {
+    unsafe { syscall1(SYS_TCP_ACCEPT, listener) as i64 }
+}
+
+pub fn tcp_connect(ip: [u8; 4], port: u16, local_port: u16) -> i64 {
+    unsafe {
+        syscall3(
+            SYS_TCP_CONNECT,
+            u32::from_be_bytes(ip) as u64,
+            port as u64,
+            local_port as u64,
+        ) as i64
+    }
+}
+
+pub fn tcp_send(handle: u64, payload: &[u8]) -> i64 {
+    unsafe { syscall3(SYS_TCP_SEND, handle, payload.as_ptr() as u64, payload.len() as u64) as i64 }
+}
+
+pub fn tcp_receive(handle: u64, out: &mut [u8]) -> i64 {
+    unsafe { syscall3(SYS_TCP_RECV, handle, out.as_mut_ptr() as u64, out.len() as u64) as i64 }
+}
+
+pub fn tcp_close(handle: u64) -> i64 {
+    unsafe { syscall1(SYS_TCP_CLOSE, handle) as i64 }
 }
 
 pub fn kernel_log(out: &mut [u8]) -> usize {

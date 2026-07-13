@@ -7,7 +7,7 @@ GOLDEN_DIR="${ROOT_DIR}/scripts/golden"
 QEMU_BIN="${QEMU:-qemu-system-x86_64}"
 CASE="${1:-all}"
 
-CASES=(ls cat procs rusthello threaddemo pipedemo eventdemo msgdemo jobdemo udpdemo)
+CASES=(ls cat procs rusthello threaddemo pipedemo eventdemo msgdemo jobdemo udpdemo tcpdemo)
 
 if ! command -v "${QEMU_BIN}" >/dev/null 2>&1; then
   echo "command smoke test skipped: ${QEMU_BIN} not found" >&2
@@ -30,6 +30,7 @@ case_command() {
     msgdemo) echo "msgdemo" ;;
     jobdemo) echo "jobdemo" ;;
     udpdemo) echo "udpdemo" ;;
+    tcpdemo) echo "tcpdemo" ;;
     *)
       echo "unknown command smoke case: $1" >&2
       return 2
@@ -130,7 +131,7 @@ run_case() (
   local command_start
   local -a network_args=()
 
-  if [[ "${name}" == "udpdemo" ]]; then
+  if [[ "${name}" == "udpdemo" || "${name}" == "tcpdemo" ]]; then
     network_args=(
       -netdev "hubport,id=net0,hubid=0"
       -device "e1000,netdev=net0,mac=52:54:00:12:34:56"

@@ -66,9 +66,15 @@ pub const SYS_UDP_BIND: u64 = 55;
 pub const SYS_UDP_SEND_TO: u64 = 56;
 pub const SYS_UDP_RECV_FROM: u64 = 57;
 pub const SYS_UDP_CLOSE: u64 = 58;
+pub const SYS_TCP_LISTEN: u64 = 59;
+pub const SYS_TCP_ACCEPT: u64 = 60;
+pub const SYS_TCP_CONNECT: u64 = 61;
+pub const SYS_TCP_SEND: u64 = 62;
+pub const SYS_TCP_RECV: u64 = 63;
+pub const SYS_TCP_CLOSE: u64 = 64;
 
 pub const ABI_VERSION_MAJOR: u64 = 1;
-pub const ABI_VERSION_MINOR: u64 = 13;
+pub const ABI_VERSION_MINOR: u64 = 14;
 pub const ABI_VERSION: u64 = (ABI_VERSION_MAJOR << 32) | ABI_VERSION_MINOR;
 
 pub const SYSCALL_RETURN_TO_KERNEL: u64 = u64::MAX;
@@ -919,6 +925,12 @@ pub fn dispatch(frame: SyscallFrame) -> Result<u64, SyscallError> {
             udp_recv_from_user(frame.arg0, frame.arg1, frame.arg2, frame.arg3, frame.arg4)
         }
         SYS_UDP_CLOSE => udp_close_user(frame.arg0),
+        SYS_TCP_LISTEN => tcp_listen_user(frame.arg0),
+        SYS_TCP_ACCEPT => tcp_accept_user(frame.arg0),
+        SYS_TCP_CONNECT => tcp_connect_user(frame.arg0, frame.arg1, frame.arg2),
+        SYS_TCP_SEND => tcp_send_user(frame.arg0, frame.arg1, frame.arg2),
+        SYS_TCP_RECV => tcp_recv_user(frame.arg0, frame.arg1, frame.arg2),
+        SYS_TCP_CLOSE => tcp_close_user(frame.arg0),
         SYS_SLEEP_MS => Err(SyscallError::NotImplemented),
         SYS_YIELD => Err(SyscallError::NotImplemented),
         SYS_EXIT => Err(SyscallError::NotImplemented),
@@ -1357,6 +1369,71 @@ fn map_udp_socket_error(error: crate::drivers::network::UdpSocketError) -> Sysca
         | crate::drivers::network::UdpSocketError::AddressInUse
         | crate::drivers::network::UdpSocketError::InvalidHandle
         | crate::drivers::network::UdpSocketError::PayloadTooLarge => SyscallError::InvalidArgument,
+    }
+}
+
+fn tcp_listen_user(port: u64) -> Result<u64, SyscallError> {
+    let port = u16::try_from(port).map_err(|_| SyscallError::InvalidArgument)?;
+    crate::drivers::network::tcp_listen(port)
+        .map(|handle| handle.as_raw())
+        .map_err(map_tcp_socket_error)
+}
+
+fn tcp_accept_user(handle: u64) -> Result<u64, SyscallError> {
+    let handle = crate::drivers::network::TcpSocketHandle::from_raw(handle)
+        .map_err(map_tcp_socket_error)?;
+    crate::drivers::network::tcp_accept(handle)
+        .map(|accepted| accepted.as_raw())
+        .map_err(map_tcp_socket_error)
+}
+
+fn tcp_connect_user(ip: u64, port: u64, local_port: u64) -> Result<u64, SyscallError> {
+    let port = u16::try_from(port).map_err(|_| SyscallError::InvalidArgument)?;
+    let local_port = u16::try_from(local_port).map_err(|_| SyscallError::InvalidArgument)?;
+    crate::drivers::network::tcp_connect((ip as u32).to_be_bytes(), port, local_port)
+        .map(|handle| handle.as_raw())
+        .map_err(map_tcp_socket_error)
+}
+
+fn tcp_send_user(handle: u64, ptr: u64, len: u64) -> Result<u64, SyscallError> {
+    let handle = crate::drivers::network::TcpSocketHandle::from_raw(handle)
+        .map_err(map_tcp_socket_error)?;
+    let payload = read_user_bytes(ptr, len)?;
+    crate::drivers::network::tcp_send(handle, payload)
+        .map(|written| written as u64)
+        .map_err(map_tcp_socket_error)
+}
+
+fn tcp_recv_user(handle: u64, ptr: u64, len: u64) -> Result<u64, SyscallError> {
+    let handle = crate::drivers::network::TcpSocketHandle::from_raw(handle)
+        .map_err(map_tcp_socket_error)?;
+    let out = user_write_range(ptr, len)?;
+    let data = crate::drivers::network::tcp_receive(handle).map_err(map_tcp_socket_error)?;
+    let payload_len = usize::from(data.payload_len);
+    if payload_len > out.len() {
+        return Err(SyscallError::InvalidArgument);
+    }
+    out[..payload_len].copy_from_slice(&data.payload[..payload_len]);
+    Ok(payload_len as u64)
+}
+
+fn tcp_close_user(handle: u64) -> Result<u64, SyscallError> {
+    let handle = crate::drivers::network::TcpSocketHandle::from_raw(handle)
+        .map_err(map_tcp_socket_error)?;
+    crate::drivers::network::tcp_close(handle)
+        .map(|_| 0)
+        .map_err(map_tcp_socket_error)
+}
+
+fn map_tcp_socket_error(error: crate::drivers::network::TcpSocketError) -> SyscallError {
+    use crate::drivers::network::TcpSocketError;
+    match error {
+        TcpSocketError::WouldBlock | TcpSocketError::SocketLimit | TcpSocketError::NoRoute
+        | TcpSocketError::TransmitFailed | TcpSocketError::NotConnected => SyscallError::WouldBlock,
+        TcpSocketError::InvalidPort | TcpSocketError::AddressInUse
+        | TcpSocketError::InvalidHandle | TcpSocketError::PayloadTooLarge => {
+            SyscallError::InvalidArgument
+        }
     }
 }
 

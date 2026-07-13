@@ -97,5 +97,13 @@ moves the bounded connection entry to closed state.
 The kernel now exposes bounded TCP socket handles for passive `listen`,
 non-blocking `accept` and `receive`, established-stream `send`, and `close`.
 Accepted connections own a four-entry receive queue, and the live boot path
-consumes `TCPDAT` through this socket API. Active connect and userland syscalls
-remain pending.
+consumes `TCPDAT` through this socket API. Active `connect` now allocates an
+accepted client handle, transmits SYN through the resolved route, validates the
+SYN-ACK sequence, emits the final ACK, and transitions from `SYN-SENT` to
+`ESTABLISHED`.
+
+ABI v1.14 exposes TCP `listen`, non-blocking `accept`, active `connect`, `send`,
+non-blocking `receive`, and `close` to native userland. `/bin/tcpdemo` creates a
+listener on port 8081, connects through the peer NIC from port 40200, accepts
+the connection, transfers `TCPUSR`, validates the received bytes, and closes
+all three socket handles in the two-NIC command smoke regression.
