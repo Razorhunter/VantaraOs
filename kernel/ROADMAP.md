@@ -770,6 +770,9 @@ Deferred filesystem hardening:
       - [x] Tambah active connect dengan SYN-SENT ke ESTABLISHED transition.
       - [x] Expose TCP listen, accept, connect, send, receive, dan close syscalls kepada userland.
       - [x] Tambah `/bin/tcpdemo` dua-NIC smoke untuk validate TCP syscall transfer end-to-end.
+      - [x] Enforce UDP/TCP socket-handle ownership mengikut PID pada syscall boundary.
+      - [x] Reclaim semua socket milik proses secara automatik apabila proses exit.
+      - [x] Add duplicate/out-of-order TCP sequence handling dan bounded receive-queue backpressure counters.
 - [ ] USB HID dan mass storage.
 - [ ] Graphics mode selepas VGA text:
   - [ ] framebuffer

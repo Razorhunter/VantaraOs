@@ -253,6 +253,7 @@ impl UdpSocketTable {
         self.sockets.remove(index);
         Ok(())
     }
+
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -493,6 +494,9 @@ struct TcpConnectionTable {
     connections: Vec<TcpConnection>,
     next_initial_sequence: u32,
     next_handle: u16,
+    duplicate_segments: u64,
+    out_of_order_segments: u64,
+    receive_queue_drops: u64,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -528,6 +532,9 @@ impl TcpConnectionTable {
             connections: Vec::new(),
             next_initial_sequence: 0x5641_4e54,
             next_handle: 1,
+            duplicate_segments: 0,
+            out_of_order_segments: 0,
+            receive_queue_drops: 0,
         }
     }
 
@@ -733,6 +740,19 @@ impl TcpConnectionTable {
                 acknowledgment_number: connection.remote_next_sequence,
             });
         }
+        if matches!(connection.state, TcpConnectionState::Established | TcpConnectionState::Closed)
+            && segment.sequence_number != connection.remote_next_sequence
+        {
+            if segment.sequence_number < connection.remote_next_sequence {
+                self.duplicate_segments = self.duplicate_segments.saturating_add(1);
+            } else {
+                self.out_of_order_segments = self.out_of_order_segments.saturating_add(1);
+            }
+            return Ok(TcpControlAction::SendAck {
+                sequence_number: connection.local_next_sequence,
+                acknowledgment_number: connection.remote_next_sequence,
+            });
+        }
         if !segment.has_flag(TCP_FLAG_ACK)
             || segment.has_flag(TCP_FLAG_SYN | TCP_FLAG_RST)
             || segment.sequence_number != connection.remote_next_sequence
@@ -750,6 +770,15 @@ impl TcpConnectionTable {
                 Ok(TcpControlAction::Established)
             }
             TcpConnectionState::Established => {
+                if !segment.payload.is_empty()
+                    && connection.receive_queue.len() >= TCP_RECEIVE_QUEUE_DEPTH
+                {
+                    self.receive_queue_drops = self.receive_queue_drops.saturating_add(1);
+                    return Ok(TcpControlAction::SendAck {
+                        sequence_number: connection.local_next_sequence,
+                        acknowledgment_number: connection.remote_next_sequence,
+                    });
+                }
                 let consumed = (segment.payload.len() as u32)
                     .saturating_add(segment.has_flag(TCP_FLAG_FIN) as u32);
                 if consumed == 0 {
@@ -780,6 +809,14 @@ impl TcpConnectionTable {
             }
             TcpConnectionState::Closed => Ok(TcpControlAction::Closed),
         }
+    }
+
+    fn hardening_counters(&self) -> (u64, u64, u64) {
+        (
+            self.duplicate_segments,
+            self.out_of_order_segments,
+            self.receive_queue_drops,
+        )
     }
 }
 
@@ -2201,6 +2238,14 @@ pub fn write_devices_to_buffer(out: &mut [u8]) -> usize {
     writer.write_str("Network devices: ");
     writer.write_dec(devices.len() as u64);
     writer.write_byte(b'\n');
+    let (duplicates, out_of_order, queue_drops) = TCP_CONNECTIONS.lock().hardening_counters();
+    writer.write_str("TCP hardening: duplicates=");
+    writer.write_dec(duplicates);
+    writer.write_str(" out_of_order=");
+    writer.write_dec(out_of_order);
+    writer.write_str(" queue_drops=");
+    writer.write_dec(queue_drops);
+    writer.write_byte(b'\n');
     writer.write_str(
         "BDF       VENDOR:DEVICE TYPE      DRIVER       BAR0             MMIO LINK MAC               RXQ TXQ DEPTH TXOK TXPACKETS RXOK RXPACKETS ETHFRAMES ETHERTYPE PROTOCOL IP ARPREQ ARPREPLY RESOLVED IPV4 CHECKSUM SOURCE DESTINATION IPPROTO UDP UDPCHECK SPORT DPORT UDPSEND SOCKET TCP TCPCHECK SPORT DPORT ESTABLISHED DATAACK CLOSED\n",
     );
@@ -2430,7 +2475,7 @@ mod tests {
         Ipv4Error, Ipv4Packet, NetworkKind, ReceivedUdpDatagram, UDP_MAX_DATAGRAM_SIZE,
         UDP_SOCKET_QUEUE_DEPTH, UdpDatagram, UdpError, UdpSocketError, UdpSocketTable,
         TCP_FLAG_ACK, TCP_FLAG_SYN, TCP_MAX_SEGMENT_SIZE, TcpError, TcpSegment, driver_name,
-        TcpConnectionTable, TcpControlAction, TcpSocketError,
+        TcpConnection, TcpConnectionState, TcpConnectionTable, TcpControlAction, TcpSocketError,
         encode_ethernet_frame, encode_ipv4_packet, encode_tcp_segment, encode_udp_datagram,
         kind_name, protocol_name,
     };
@@ -2752,6 +2797,45 @@ mod tests {
             })
         );
         assert!(table.send_info(handle).is_ok());
+    }
+
+    #[test_case]
+    fn handles_duplicate_out_of_order_and_full_tcp_queue() {
+        let remote_ip = [10, 0, 2, 15];
+        let mut table = TcpConnectionTable::new();
+        let handle = table.allocate_handle();
+        table.connections.push(TcpConnection {
+            handle,
+            remote_ip,
+            remote_port: 40000,
+            local_port: 8080,
+            local_next_sequence: 10,
+            remote_next_sequence: 20,
+            state: TcpConnectionState::Established,
+            accepted: true,
+            receive_queue: alloc::vec::Vec::new(),
+        });
+        let segment = |sequence_number, payload: &'static [u8]| TcpSegment {
+            source_port: 40000,
+            destination_port: 8080,
+            sequence_number,
+            acknowledgment_number: 10,
+            flags: TCP_FLAG_ACK,
+            window_size: 4096,
+            payload,
+        };
+
+        table.process(remote_ip, segment(20, b"a")).unwrap();
+        table.process(remote_ip, segment(20, b"a")).unwrap();
+        table.process(remote_ip, segment(99, b"z")).unwrap();
+        table.process(remote_ip, segment(21, b"b")).unwrap();
+        table.process(remote_ip, segment(22, b"c")).unwrap();
+        table.process(remote_ip, segment(23, b"d")).unwrap();
+        table.process(remote_ip, segment(24, b"e")).unwrap();
+
+        assert_eq!(table.hardening_counters(), (1, 1, 1));
+        assert_eq!(table.connections[0].remote_next_sequence, 24);
+        assert_eq!(table.connections[0].receive_queue.len(), 4);
     }
 
     #[test_case]

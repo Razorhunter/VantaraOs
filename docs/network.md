@@ -107,3 +107,16 @@ non-blocking `receive`, and `close` to native userland. `/bin/tcpdemo` creates a
 listener on port 8081, connects through the peer NIC from port 40200, accepts
 the connection, transfers `TCPUSR`, validates the received bytes, and closes
 all three socket handles in the two-NIC command smoke regression.
+
+UDP and TCP syscall handles are now registered against the creating process ID.
+Every send, receive, accept, and close operation validates ownership, preventing
+one process from guessing and using another process's handle. Process teardown
+reclaims every registered network handle, including partially used listeners
+and connections; registration failure also rolls back the newly created socket.
+
+Established TCP connections now distinguish duplicate and future out-of-order
+sequence numbers. Both are acknowledged with the current receive sequence
+without delivering bytes or advancing state. A full receive queue similarly
+keeps the sequence unchanged so the sender can retry after userland drains the
+queue. Duplicate, out-of-order, and queue-drop counters are visible in
+`/Devices/net` under `TCP hardening`.
