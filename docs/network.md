@@ -84,4 +84,12 @@ and the IPv4 pseudo-header checksum. Malformed header lengths, reserved port
 zero, oversized payloads, and invalid checksums are rejected. A bounded passive
 connection table validates the `LISTEN -> SYN-RECEIVED -> ESTABLISHED` state
 transitions and sequence/acknowledgment numbers. Wiring those actions to live
-two-NIC frame transmission remains pending.
+two-NIC frame transmission is now complete: the QEMU regression sends a SYN
+from `10.0.2.15:40001` to `10.0.2.16:8080`, validates the returned SYN-ACK,
+sends the final ACK, and requires both interfaces to report an established
+connection.
+
+The established path now accepts in-order payload, advances the peer sequence,
+and returns a cumulative ACK. The same live regression transfers `TCPDAT`, then
+sends FIN and verifies the passive endpoint acknowledges the consumed FIN and
+moves the bounded connection entry to closed state.

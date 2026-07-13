@@ -76,6 +76,11 @@ const TCP_FLAG_RST: u16 = 1 << 2;
 const TCP_FLAG_PSH: u16 = 1 << 3;
 const TCP_FLAG_ACK: u16 = 1 << 4;
 const TCP_CONNECTION_LIMIT: usize = 8;
+const TCP_TEST_CLIENT_PORT: u16 = 40001;
+const TCP_TEST_SERVER_PORT: u16 = 8080;
+const TCP_TEST_INITIAL_SEQUENCE: u32 = 100;
+const TCP_TEST_PAYLOAD: &[u8; 6] = b"TCPDAT";
+const TCP_MAX_PAYLOAD_SIZE: usize = TCP_MAX_SEGMENT_SIZE - TCP_MIN_HEADER_SIZE;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum UdpSocketError {
@@ -391,6 +396,7 @@ fn encode_tcp_segment(
 enum TcpConnectionState {
     SynReceived,
     Established,
+    Closed,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -409,7 +415,12 @@ enum TcpControlAction {
         sequence_number: u32,
         acknowledgment_number: u32,
     },
+    SendAck {
+        sequence_number: u32,
+        acknowledgment_number: u32,
+    },
     Established,
+    Closed,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -426,6 +437,32 @@ struct TcpConnectionTable {
     listeners: Vec<u16>,
     connections: Vec<TcpConnection>,
     next_initial_sequence: u32,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct ReceivedTcpSegment {
+    source_port: u16,
+    destination_port: u16,
+    sequence_number: u32,
+    acknowledgment_number: u32,
+    flags: u16,
+    window_size: u16,
+    payload: [u8; TCP_MAX_PAYLOAD_SIZE],
+    payload_len: u8,
+}
+
+impl ReceivedTcpSegment {
+    fn as_segment(&self) -> TcpSegment<'_> {
+        TcpSegment {
+            source_port: self.source_port,
+            destination_port: self.destination_port,
+            sequence_number: self.sequence_number,
+            acknowledgment_number: self.acknowledgment_number,
+            flags: self.flags,
+            window_size: self.window_size,
+            payload: &self.payload[..usize::from(self.payload_len)],
+        }
+    }
 }
 
 impl TcpConnectionTable {
@@ -488,16 +525,40 @@ impl TcpConnectionTable {
                     && connection.local_port == segment.destination_port
             })
             .ok_or(TcpConnectionError::InvalidHandshake)?;
-        if connection.state != TcpConnectionState::SynReceived
-            || !segment.has_flag(TCP_FLAG_ACK)
-            || segment.has_flag(TCP_FLAG_SYN | TCP_FLAG_RST | TCP_FLAG_FIN)
+        if !segment.has_flag(TCP_FLAG_ACK)
+            || segment.has_flag(TCP_FLAG_SYN | TCP_FLAG_RST)
             || segment.sequence_number != connection.remote_next_sequence
             || segment.acknowledgment_number != connection.local_next_sequence
         {
             return Err(TcpConnectionError::InvalidHandshake);
         }
-        connection.state = TcpConnectionState::Established;
-        Ok(TcpControlAction::Established)
+        match connection.state {
+            TcpConnectionState::SynReceived => {
+                if segment.has_flag(TCP_FLAG_FIN) || !segment.payload.is_empty() {
+                    return Err(TcpConnectionError::InvalidHandshake);
+                }
+                connection.state = TcpConnectionState::Established;
+                Ok(TcpControlAction::Established)
+            }
+            TcpConnectionState::Established => {
+                let consumed = (segment.payload.len() as u32)
+                    .saturating_add(segment.has_flag(TCP_FLAG_FIN) as u32);
+                if consumed == 0 {
+                    return Ok(TcpControlAction::Established);
+                }
+                connection.remote_next_sequence =
+                    connection.remote_next_sequence.wrapping_add(consumed);
+                let action = TcpControlAction::SendAck {
+                    sequence_number: connection.local_next_sequence,
+                    acknowledgment_number: connection.remote_next_sequence,
+                };
+                if segment.has_flag(TCP_FLAG_FIN) {
+                    connection.state = TcpConnectionState::Closed;
+                }
+                Ok(action)
+            }
+            TcpConnectionState::Closed => Ok(TcpControlAction::Closed),
+        }
     }
 }
 
@@ -772,6 +833,13 @@ pub struct NetworkDevice {
     pub last_udp_destination_port: u16,
     pub udp_send_ok: bool,
     pub udp_socket_delivered: bool,
+    pub tcp_packets: u64,
+    pub tcp_checksum_valid: bool,
+    pub last_tcp_source_port: u16,
+    pub last_tcp_destination_port: u16,
+    pub tcp_established: bool,
+    pub tcp_data_acked: bool,
+    pub tcp_closed: bool,
     mmio_base: u64,
     physical_memory_offset: u64,
     queues: Option<E1000Queues>,
@@ -841,6 +909,7 @@ impl E1000Mmio {
 lazy_static! {
     static ref DEVICES: Mutex<Vec<NetworkDevice>> = Mutex::new(Vec::new());
     static ref UDP_SOCKETS: Mutex<UdpSocketTable> = Mutex::new(UdpSocketTable::new());
+    static ref TCP_CONNECTIONS: Mutex<TcpConnectionTable> = Mutex::new(TcpConnectionTable::new());
 }
 
 pub fn udp_bind(local_port: u16) -> Result<UdpSocketHandle, UdpSocketError> {
@@ -955,6 +1024,13 @@ pub fn init(
                 last_udp_destination_port: 0,
                 udp_send_ok: false,
                 udp_socket_delivered: false,
+                tcp_packets: 0,
+                tcp_checksum_valid: false,
+                last_tcp_source_port: 0,
+                last_tcp_destination_port: 0,
+                tcp_established: false,
+                tcp_data_acked: false,
+                tcp_closed: false,
                 mmio_base: 0,
                 physical_memory_offset: physical_memory_offset.as_u64(),
                 queues: None,
@@ -1022,6 +1098,7 @@ pub fn init(
     let mut devices = devices;
     let udp_receive_socket = udp_bind(UDP_TEST_DESTINATION_PORT).ok();
     let udp_send_socket = udp_bind(UDP_TEST_SOURCE_PORT).ok();
+    let _ = TCP_CONNECTIONS.lock().listen(TCP_TEST_SERVER_PORT);
     for device in &mut devices {
         poll_receive(device);
     }
@@ -1050,6 +1127,47 @@ pub fn init(
                 && datagram.payload[..usize::from(datagram.payload_len)] == *UDP_TEST_PAYLOAD;
             let _ = udp_close(handle);
         }
+        if submit_tcp_segment(
+            &mut devices[0],
+            target_ip,
+            TCP_TEST_CLIENT_PORT,
+            TCP_TEST_SERVER_PORT,
+            TCP_TEST_INITIAL_SEQUENCE,
+            0,
+            TCP_FLAG_SYN,
+            &[],
+        ) {
+            poll_receive(&mut devices[1]);
+            poll_receive(&mut devices[0]);
+            poll_receive(&mut devices[1]);
+            let server_next_sequence = 0x5641_4e55;
+            if submit_tcp_segment(
+                &mut devices[0],
+                target_ip,
+                TCP_TEST_CLIENT_PORT,
+                TCP_TEST_SERVER_PORT,
+                TCP_TEST_INITIAL_SEQUENCE + 1,
+                server_next_sequence,
+                TCP_FLAG_PSH | TCP_FLAG_ACK,
+                TCP_TEST_PAYLOAD,
+            ) {
+                poll_receive(&mut devices[1]);
+                poll_receive(&mut devices[0]);
+            }
+            if submit_tcp_segment(
+                &mut devices[0],
+                target_ip,
+                TCP_TEST_CLIENT_PORT,
+                TCP_TEST_SERVER_PORT,
+                TCP_TEST_INITIAL_SEQUENCE + 1 + TCP_TEST_PAYLOAD.len() as u32,
+                server_next_sequence,
+                TCP_FLAG_FIN | TCP_FLAG_ACK,
+                &[],
+            ) {
+                poll_receive(&mut devices[1]);
+                poll_receive(&mut devices[0]);
+            }
+        }
     }
 
     crate::serial_println!("[NET] detected {} network device(s)", devices.len());
@@ -1076,7 +1194,7 @@ pub fn init(
 
     for device in &devices {
         crate::serial_println!(
-            "[NET] {:02x}:{:02x}.{} vendor={:04x} device={:04x} kind={:?} driver={:?} bar0={:#x} mmio_ready={} ctrl={:#010x} status={:#010x} link_up={} mac={:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x} mac_valid={} rxq={} txq={} depth={} tx_test={} tx_packets={} rx_test={} rx_packets={} ethernet_frames={} ether_type={:#06x} protocol={} ip={}.{}.{}.{} arp_requests={} arp_replies={} arp_resolved={} ipv4_packets={} ipv4_checksum={} ipv4_source={}.{}.{}.{} ipv4_destination={}.{}.{}.{} ipv4_protocol={} udp_packets={} udp_checksum={} udp_source_port={} udp_destination_port={} udp_send_ok={} udp_socket_delivered={}",
+            "[NET] {:02x}:{:02x}.{} vendor={:04x} device={:04x} kind={:?} driver={:?} bar0={:#x} mmio_ready={} ctrl={:#010x} status={:#010x} link_up={} mac={:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x} mac_valid={} rxq={} txq={} depth={} tx_test={} tx_packets={} rx_test={} rx_packets={} ethernet_frames={} ether_type={:#06x} protocol={} ip={}.{}.{}.{} arp_requests={} arp_replies={} arp_resolved={} ipv4_packets={} ipv4_checksum={} ipv4_source={}.{}.{}.{} ipv4_destination={}.{}.{}.{} ipv4_protocol={} udp_packets={} udp_checksum={} udp_source_port={} udp_destination_port={} udp_send_ok={} udp_socket_delivered={} tcp_packets={} tcp_checksum={} tcp_source_port={} tcp_destination_port={} tcp_established={} tcp_data_acked={} tcp_closed={}",
             device.pci.bus,
             device.pci.slot,
             device.pci.function,
@@ -1129,7 +1247,14 @@ pub fn init(
             device.last_udp_source_port,
             device.last_udp_destination_port,
             device.udp_send_ok,
-            device.udp_socket_delivered
+            device.udp_socket_delivered,
+            device.tcp_packets,
+            device.tcp_checksum_valid,
+            device.last_tcp_source_port,
+            device.last_tcp_destination_port,
+            device.tcp_established,
+            device.tcp_data_acked,
+            device.tcp_closed
         );
     }
 
@@ -1301,7 +1426,27 @@ fn poll_receive_with_limit(device: &mut NetworkDevice, poll_limit: usize) -> boo
                 } else {
                     None
                 };
-                (packet.source, packet.destination, packet.protocol, udp)
+                let tcp = if packet.protocol == IP_PROTOCOL_TCP {
+                    TcpSegment::parse(packet.source, packet.destination, packet.payload)
+                        .ok()
+                        .map(|segment| {
+                            let mut payload = [0; TCP_MAX_PAYLOAD_SIZE];
+                            payload[..segment.payload.len()].copy_from_slice(segment.payload);
+                            ReceivedTcpSegment {
+                                source_port: segment.source_port,
+                                destination_port: segment.destination_port,
+                                sequence_number: segment.sequence_number,
+                                acknowledgment_number: segment.acknowledgment_number,
+                                flags: segment.flags,
+                                window_size: segment.window_size,
+                                payload,
+                                payload_len: segment.payload.len() as u8,
+                            }
+                        })
+                } else {
+                    None
+                };
+                (packet.source, packet.destination, packet.protocol, udp, tcp)
             });
         core::ptr::write_volatile(
             descriptor_pointer.add(index),
@@ -1338,7 +1483,7 @@ fn poll_receive_with_limit(device: &mut NetworkDevice, poll_limit: usize) -> boo
             device.arp_replies = device.arp_replies.saturating_add(1);
         }
     }
-    if let Some((source, destination, protocol, udp)) = received_ipv4 {
+    if let Some((source, destination, protocol, udp, tcp)) = received_ipv4 {
         if destination == device.ipv4_address {
             device.ipv4_packets = device.ipv4_packets.saturating_add(1);
             device.ipv4_checksum_valid = true;
@@ -1362,6 +1507,86 @@ fn poll_receive_with_limit(device: &mut NetworkDevice, poll_limit: usize) -> boo
                     payload,
                     payload_len,
                 });
+            }
+            if let Some(segment) = tcp {
+                device.tcp_packets = device.tcp_packets.saturating_add(1);
+                device.tcp_checksum_valid = true;
+                device.last_tcp_source_port = segment.source_port;
+                device.last_tcp_destination_port = segment.destination_port;
+
+                if segment.flags & (TCP_FLAG_SYN | TCP_FLAG_ACK)
+                    == (TCP_FLAG_SYN | TCP_FLAG_ACK)
+                    && segment.destination_port == TCP_TEST_CLIENT_PORT
+                {
+                    device.tcp_established = submit_tcp_segment(
+                        device,
+                        source,
+                        segment.destination_port,
+                        segment.source_port,
+                        segment.acknowledgment_number,
+                        segment.sequence_number.wrapping_add(1),
+                        TCP_FLAG_ACK,
+                        &[],
+                    );
+                } else if segment.destination_port == TCP_TEST_CLIENT_PORT
+                    && segment.flags & TCP_FLAG_ACK != 0
+                {
+                    let data_end = TCP_TEST_INITIAL_SEQUENCE
+                        + 1
+                        + TCP_TEST_PAYLOAD.len() as u32;
+                    if segment.acknowledgment_number == data_end {
+                        device.tcp_data_acked = true;
+                    } else if segment.acknowledgment_number == data_end + 1 {
+                        device.tcp_closed = true;
+                    }
+                } else {
+                    match TCP_CONNECTIONS.lock().process(source, segment.as_segment()) {
+                        Ok(TcpControlAction::SendSynAck {
+                            sequence_number,
+                            acknowledgment_number,
+                        }) => {
+                            submit_tcp_segment(
+                                device,
+                                source,
+                                segment.destination_port,
+                                segment.source_port,
+                                sequence_number,
+                                acknowledgment_number,
+                                TCP_FLAG_SYN | TCP_FLAG_ACK,
+                                &[],
+                            );
+                        }
+                        Ok(TcpControlAction::SendAck {
+                            sequence_number,
+                            acknowledgment_number,
+                        }) => {
+                            let closing = segment.flags & TCP_FLAG_FIN != 0;
+                            if submit_tcp_segment(
+                                device,
+                                source,
+                                segment.destination_port,
+                                segment.source_port,
+                                sequence_number,
+                                acknowledgment_number,
+                                TCP_FLAG_ACK,
+                                &[],
+                            ) {
+                                if closing {
+                                    device.tcp_closed = true;
+                                } else {
+                                    device.tcp_data_acked = true;
+                                }
+                            }
+                        }
+                        Ok(TcpControlAction::Established) => {
+                            device.tcp_established = true;
+                        }
+                        Ok(TcpControlAction::Closed) => {
+                            device.tcp_closed = true;
+                        }
+                        Err(_) => {}
+                    }
+                }
             }
         }
     }
@@ -1456,6 +1681,77 @@ fn submit_udp_datagram(
     } else {
         Err(UdpSocketError::TransmitFailed)
     }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn submit_tcp_segment(
+    device: &mut NetworkDevice,
+    destination_ip: [u8; 4],
+    source_port: u16,
+    destination_port: u16,
+    sequence_number: u32,
+    acknowledgment_number: u32,
+    flags: u16,
+    payload: &[u8],
+) -> bool {
+    let Some((cached_ip, destination_mac)) = device.arp_cache else {
+        return false;
+    };
+    if cached_ip != destination_ip {
+        return false;
+    }
+    let mut segment = [0; TCP_MAX_SEGMENT_SIZE];
+    let Ok(segment_len) = encode_tcp_segment(
+        &mut segment,
+        device.ipv4_address,
+        destination_ip,
+        source_port,
+        destination_port,
+        sequence_number,
+        acknowledgment_number,
+        flags,
+        4096,
+        payload,
+    ) else {
+        return false;
+    };
+    let mut packet = [0; IPV4_MAX_PACKET_SIZE];
+    let Ok(packet_len) = encode_ipv4_packet(
+        &mut packet,
+        device.ipv4_address,
+        destination_ip,
+        IP_PROTOCOL_TCP,
+        &segment[..segment_len],
+    ) else {
+        return false;
+    };
+    let mut frame = [0; ETHERNET_MIN_FRAME_SIZE];
+    if encode_ethernet_frame(
+        &mut frame,
+        destination_mac,
+        device.mac,
+        ETHER_TYPE_IPV4,
+        &packet[..packet_len],
+    )
+    .is_err()
+    {
+        return false;
+    }
+    let Some(queues) = device.queues.as_mut() else {
+        return false;
+    };
+    let sent = submit_frame(
+        E1000Mmio {
+            base: device.mmio_base,
+        },
+        VirtAddr::new(device.physical_memory_offset),
+        queues,
+        &frame,
+    );
+    if sent {
+        device.tx_packets = device.tx_packets.saturating_add(1);
+    }
+    sent
 }
 
 fn submit_arp_request(device: &mut NetworkDevice, target_ip: [u8; 4]) {
@@ -1589,7 +1885,7 @@ pub fn write_devices_to_buffer(out: &mut [u8]) -> usize {
     writer.write_dec(devices.len() as u64);
     writer.write_byte(b'\n');
     writer.write_str(
-        "BDF       VENDOR:DEVICE TYPE      DRIVER       BAR0             MMIO LINK MAC               RXQ TXQ DEPTH TXOK TXPACKETS RXOK RXPACKETS ETHFRAMES ETHERTYPE PROTOCOL IP ARPREQ ARPREPLY RESOLVED IPV4 CHECKSUM SOURCE DESTINATION IPPROTO UDP UDPCHECK SPORT DPORT UDPSEND SOCKET\n",
+        "BDF       VENDOR:DEVICE TYPE      DRIVER       BAR0             MMIO LINK MAC               RXQ TXQ DEPTH TXOK TXPACKETS RXOK RXPACKETS ETHFRAMES ETHERTYPE PROTOCOL IP ARPREQ ARPREPLY RESOLVED IPV4 CHECKSUM SOURCE DESTINATION IPPROTO UDP UDPCHECK SPORT DPORT UDPSEND SOCKET TCP TCPCHECK SPORT DPORT ESTABLISHED DATAACK CLOSED\n",
     );
 
     for device in devices.iter() {
@@ -1664,6 +1960,20 @@ pub fn write_devices_to_buffer(out: &mut [u8]) -> usize {
         writer.write_dec(device.udp_send_ok as u64);
         writer.write_byte(b' ');
         writer.write_dec(device.udp_socket_delivered as u64);
+        writer.write_byte(b' ');
+        writer.write_dec(device.tcp_packets);
+        writer.write_byte(b' ');
+        writer.write_dec(device.tcp_checksum_valid as u64);
+        writer.write_byte(b' ');
+        writer.write_dec(device.last_tcp_source_port as u64);
+        writer.write_byte(b' ');
+        writer.write_dec(device.last_tcp_destination_port as u64);
+        writer.write_byte(b' ');
+        writer.write_dec(device.tcp_established as u64);
+        writer.write_byte(b' ');
+        writer.write_dec(device.tcp_data_acked as u64);
+        writer.write_byte(b' ');
+        writer.write_dec(device.tcp_closed as u64);
         writer.write_byte(b'\n');
     }
 

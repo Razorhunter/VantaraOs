@@ -763,7 +763,9 @@ Deferred filesystem hardening:
       - [x] Generate dan validate TCP checksum menggunakan IPv4 pseudo-header.
       - [x] Reject malformed header length, invalid port, oversized payload, dan invalid checksum.
       - [x] Implement bounded connection table dan state machine SYN/SYN-ACK/ACK.
-      - [ ] Buktikan TCP handshake melalui dua NIC QEMU.
+      - [x] Buktikan TCP handshake melalui dua NIC QEMU.
+      - [x] Hantar TCP payload selepas established dan validate cumulative ACK.
+      - [x] Implement passive FIN close dan buktikan close melalui dua NIC QEMU.
 - [ ] USB HID dan mass storage.
 - [ ] Graphics mode selepas VGA text:
   - [ ] framebuffer
