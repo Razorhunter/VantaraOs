@@ -654,6 +654,19 @@ pub fn udp_send_to(
     )
 }
 
+/// Process packets already completed by the NIC without waiting inside the
+/// runtime event loop. Work is bounded to one receive-ring pass per device.
+pub fn poll_runtime() {
+    let mut devices = DEVICES.lock();
+    for device in devices.iter_mut() {
+        for _ in 0..DMA_RING_DEPTH {
+            if !poll_receive_with_limit(device, 1) {
+                break;
+            }
+        }
+    }
+}
+
 pub fn init(
     mapper: &mut impl Mapper<Size4KiB>,
     frame_allocator: &mut impl FrameAllocator<Size4KiB>,
@@ -990,8 +1003,12 @@ fn initialize_dma_queues(
 }
 
 fn poll_receive(device: &mut NetworkDevice) {
+    let _ = poll_receive_with_limit(device, TRANSMIT_POLL_LIMIT);
+}
+
+fn poll_receive_with_limit(device: &mut NetworkDevice, poll_limit: usize) -> bool {
     let Some(queues) = device.queues.as_mut() else {
-        return;
+        return false;
     };
     let index = queues.receive_next as usize;
     let physical_memory_offset = VirtAddr::new(device.physical_memory_offset);
@@ -1006,7 +1023,7 @@ fn poll_receive(device: &mut NetworkDevice) {
     let received_ipv4;
     unsafe {
         let mut completed = None;
-        for _ in 0..TRANSMIT_POLL_LIMIT {
+        for _ in 0..poll_limit {
             let descriptor = core::ptr::read_volatile(descriptor_pointer.add(index));
             if descriptor.status & DESCRIPTOR_DONE != 0 {
                 completed = Some(descriptor);
@@ -1015,13 +1032,13 @@ fn poll_receive(device: &mut NetworkDevice) {
             core::hint::spin_loop();
         }
         let Some(descriptor) = completed else {
-            return;
+            return false;
         };
         if descriptor.errors != 0
             || usize::from(descriptor.length) < 27
             || usize::from(descriptor.length) > 2048
         {
-            return;
+            return false;
         }
         let packet = core::slice::from_raw_parts(buffer_pointer, usize::from(descriptor.length));
         let parsed = EthernetFrame::parse(packet).ok();
@@ -1122,6 +1139,7 @@ fn poll_receive(device: &mut NetworkDevice) {
             }
         }
     }
+    true
 }
 
 fn submit_udp_from_socket(

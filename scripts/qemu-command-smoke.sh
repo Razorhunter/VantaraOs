@@ -128,6 +128,16 @@ run_case() (
   local golden_file="${GOLDEN_DIR}/${name}.golden"
   local qemu_pid=""
   local command_start
+  local -a network_args=()
+
+  if [[ "${name}" == "udpdemo" ]]; then
+    network_args=(
+      -netdev "hubport,id=net0,hubid=0"
+      -device "e1000,netdev=net0,mac=52:54:00:12:34:56"
+      -netdev "hubport,id=net1,hubid=0"
+      -device "e1000,netdev=net1,mac=52:54:00:12:34:57"
+    )
+  fi
 
   command="$(case_command "${name}")"
   mkdir -p "${ROOT_DIR}/target"
@@ -147,6 +157,7 @@ run_case() (
 
   "${QEMU_BIN}" \
     -drive "format=raw,file=${BOOTIMAGE}" \
+    "${network_args[@]}" \
     -display none \
     -serial "file:${log_file}" \
     -monitor stdio \

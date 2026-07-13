@@ -73,5 +73,10 @@ including duplicate-bind rejection, non-blocking empty receive semantics, and
 clean close. UDP send from userland succeeds when a route is already resolved,
 and otherwise reports a non-blocking unavailable state.
 
+The scheduler-owned kernel event thread now polls completed RX descriptors on
+every runtime wake-up. Each pass is bounded to one descriptor-ring traversal
+per device and never spin-waits for a packet. This lets datagrams that arrive
+after boot reach a user socket while normal processes are running.
+
 The e1000 NIC-driver, Ethernet, ARP, IPv4, UDP, and kernel receive-socket
 baselines are complete. TCP remains pending.

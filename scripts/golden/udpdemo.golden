@@ -1,4 +1,6 @@
 udpdemo: bind ok
 udpdemo: duplicate guard ok
+udpdemo: send ok
 udpdemo: empty receive ok
+udpdemo: runtime receive ok
 udpdemo: done
