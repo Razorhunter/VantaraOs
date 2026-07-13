@@ -21,6 +21,12 @@ QEMU_DRIVES := \
 	-drive format=raw,file=$(BOOTIMAGE),index=0,media=disk \
 	-drive format=raw,file=$(PERSIST_IMAGE),index=1,media=disk
 
+QEMU_NETWORK := \
+	-netdev hubport,id=net0,hubid=0 \
+	-device e1000,netdev=net0,mac=52:54:00:12:34:56 \
+	-netdev hubport,id=net1,hubid=0 \
+	-device e1000,netdev=net1,mac=52:54:00:12:34:57
+
 ASM_PROGRAMS := demo uptime ls cat whoami touch write rm mv mkdir rmdir
 ELF_PROGRAMS := \
 	init fault login sh stat procs pci netdev dmesg drvstat kill sleep \
@@ -212,6 +218,7 @@ reset-persist:
 run: kernel-build persist-disk
 	$(QEMU) \
 		$(QEMU_DRIVES) \
+		$(QEMU_NETWORK) \
 		-display none \
 		-vnc 0.0.0.0:$(VNC_DISPLAY) \
 		-serial stdio
