@@ -667,9 +667,9 @@ Deferred filesystem hardening:
 
 ### Phase D: Hardware And I/O Maturity
 
-- [ ] Storage driver path:
+- [x] Storage driver path:
   - [x] ATA PIO polling baseline untuk persistence disk.
-  - [ ] AHCI/NVMe roadmap
+  - [x] AHCI/NVMe roadmap
     - [x] Detect PCI AHCI class `01/06/01`.
     - [x] Decode 32-bit/64-bit PCI BAR dan validate ABAR5 memory BAR.
     - [x] Tambah AHCI controller registry dan `/dev/ahci`.
@@ -720,7 +720,7 @@ Deferred filesystem hardening:
     - [x] Kekalkan superfloppy compatibility untuk persistence image lama.
     - [x] Expose active storage range melalui `/dev/partitions`.
     - [x] Buktikan partition-offset persistence merentas dua boot QEMU.
-- [ ] Network stack roadmap:
+- [x] Network stack roadmap:
   - [x] NIC driver
     - [x] Detect Intel 82540EM/e1000 dan 82574L/e1000e PCI IDs.
     - [x] Decode dan map BAR0 MMIO melalui audited uncached window.
@@ -745,7 +745,7 @@ Deferred filesystem hardening:
     - [x] Validate version, IHL, total length, destination, dan protocol dispatch.
     - [x] Reject malformed, oversized, dan fragmented packets buat masa ini.
     - [x] Buktikan unicast IPv4 delivery selepas ARP resolution melalui dua NIC QEMU.
-  - [ ] Transport
+  - [x] Transport
     - [x] UDP
       - [x] Encode dan parse source port, destination port, length, dan payload.
       - [x] Generate dan validate UDP checksum menggunakan IPv4 pseudo-header.
@@ -758,7 +758,7 @@ Deferred filesystem hardening:
       - [x] Expose user-facing UDP syscalls untuk bind, send_to, recv_from, dan close.
       - [x] Tambah `/bin/udpdemo` command smoke untuk validate UDP syscall ABI surface.
       - [x] Poll RX semasa runtime dan buktikan live UDP delivery kepada proses userland.
-    - [ ] TCP
+    - [x] TCP
       - [x] Encode dan parse minimum TCP header, sequence/ack numbers, flags, window, dan payload.
       - [x] Generate dan validate TCP checksum menggunakan IPv4 pseudo-header.
       - [x] Reject malformed header length, invalid port, oversized payload, dan invalid checksum.
@@ -773,7 +773,16 @@ Deferred filesystem hardening:
       - [x] Enforce UDP/TCP socket-handle ownership mengikut PID pada syscall boundary.
       - [x] Reclaim semua socket milik proses secara automatik apabila proses exit.
       - [x] Add duplicate/out-of-order TCP sequence handling dan bounded receive-queue backpressure counters.
-- [ ] USB HID dan mass storage.
+      - [x] Add bounded SYN/SYN-ACK retransmission dan timeout cleanup untuk half-open connections.
+- [ ] USB maturity:
+  - [x] USB HID keyboard/mouse baseline.
+  - [ ] USB mass storage:
+    - [ ] Detect mass-storage interface class `08/06/50`.
+    - [ ] Implement Bulk-Only Transport CBW/CSW transaction baseline.
+    - [ ] Implement SCSI INQUIRY dan TEST UNIT READY.
+    - [ ] Implement READ CAPACITY(10) dan READ(10).
+    - [ ] Expose read-only USB mass-storage `BlockDevice` dan diagnostics.
+    - [ ] Tambah QEMU USB-storage discovery/read regression.
 - [ ] Graphics mode selepas VGA text:
   - [ ] framebuffer
   - [ ] compositor/server prototype

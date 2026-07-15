@@ -82,6 +82,8 @@ const TCP_TEST_INITIAL_SEQUENCE: u32 = 100;
 const TCP_TEST_PAYLOAD: &[u8; 6] = b"TCPDAT";
 const TCP_MAX_PAYLOAD_SIZE: usize = TCP_MAX_SEGMENT_SIZE - TCP_MIN_HEADER_SIZE;
 const TCP_RECEIVE_QUEUE_DEPTH: usize = 4;
+const TCP_HANDSHAKE_TIMEOUT_TICKS: u64 = crate::timer::TIMER_HZ as u64;
+const TCP_HANDSHAKE_RETRY_LIMIT: u8 = 3;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct TcpSocketHandle(u16);
@@ -253,7 +255,6 @@ impl UdpSocketTable {
         self.sockets.remove(index);
         Ok(())
     }
-
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -373,9 +374,7 @@ impl<'a> TcpSegment<'a> {
             source_port,
             destination_port,
             sequence_number: u32::from_be_bytes([bytes[4], bytes[5], bytes[6], bytes[7]]),
-            acknowledgment_number: u32::from_be_bytes([
-                bytes[8], bytes[9], bytes[10], bytes[11],
-            ]),
+            acknowledgment_number: u32::from_be_bytes([bytes[8], bytes[9], bytes[10], bytes[11]]),
             flags: u16::from_be_bytes([bytes[12] & 1, bytes[13]]),
             window_size: u16::from_be_bytes([bytes[14], bytes[15]]),
             payload: &bytes[header_length..],
@@ -450,6 +449,8 @@ struct TcpConnection {
     state: TcpConnectionState,
     accepted: bool,
     receive_queue: Vec<ReceivedTcpData>,
+    last_activity_tick: u64,
+    handshake_retries: u8,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -465,6 +466,12 @@ struct TcpSendInfo {
     local_port: u16,
     sequence_number: u32,
     acknowledgment_number: u32,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct TcpMaintenanceAction {
+    info: TcpSendInfo,
+    flags: u16,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -497,6 +504,8 @@ struct TcpConnectionTable {
     duplicate_segments: u64,
     out_of_order_segments: u64,
     receive_queue_drops: u64,
+    handshake_retransmissions: u64,
+    handshake_timeouts: u64,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -535,6 +544,8 @@ impl TcpConnectionTable {
             duplicate_segments: 0,
             out_of_order_segments: 0,
             receive_queue_drops: 0,
+            handshake_retransmissions: 0,
+            handshake_timeouts: 0,
         }
     }
 
@@ -548,7 +559,11 @@ impl TcpConnectionTable {
         if local_port == 0 {
             return Err(TcpSocketError::InvalidPort);
         }
-        if self.listeners.iter().any(|listener| listener.local_port == local_port) {
+        if self
+            .listeners
+            .iter()
+            .any(|listener| listener.local_port == local_port)
+        {
             return Err(TcpSocketError::AddressInUse);
         }
         if self.listeners.len() >= TCP_CONNECTION_LIMIT {
@@ -591,7 +606,10 @@ impl TcpConnectionTable {
         if self.connections.len() >= TCP_CONNECTION_LIMIT {
             return Err(TcpSocketError::SocketLimit);
         }
-        if self.listeners.iter().any(|entry| entry.local_port == local_port)
+        if self
+            .listeners
+            .iter()
+            .any(|entry| entry.local_port == local_port)
             || self
                 .connections
                 .iter()
@@ -612,6 +630,8 @@ impl TcpConnectionTable {
             state: TcpConnectionState::SynSent,
             accepted: true,
             receive_queue: Vec::new(),
+            last_activity_tick: crate::timer::ticks(),
+            handshake_retries: 0,
         });
         Ok((
             handle,
@@ -638,7 +658,11 @@ impl TcpConnectionTable {
     }
 
     fn close(&mut self, handle: TcpSocketHandle) -> Result<(), TcpSocketError> {
-        if let Some(index) = self.listeners.iter().position(|entry| entry.handle == handle) {
+        if let Some(index) = self
+            .listeners
+            .iter()
+            .position(|entry| entry.handle == handle)
+        {
             let port = self.listeners.remove(index).local_port;
             self.connections.retain(|entry| entry.local_port != port);
             return Ok(());
@@ -676,9 +700,8 @@ impl TcpConnectionTable {
             .iter_mut()
             .find(|entry| entry.handle == handle)
         {
-            connection.local_next_sequence = connection
-                .local_next_sequence
-                .wrapping_add(length as u32);
+            connection.local_next_sequence =
+                connection.local_next_sequence.wrapping_add(length as u32);
         }
     }
 
@@ -711,6 +734,8 @@ impl TcpConnectionTable {
                 state: TcpConnectionState::SynReceived,
                 accepted: false,
                 receive_queue: Vec::new(),
+                last_activity_tick: crate::timer::ticks(),
+                handshake_retries: 0,
             });
             return Ok(TcpControlAction::SendSynAck {
                 sequence_number: initial_sequence,
@@ -735,13 +760,16 @@ impl TcpConnectionTable {
             }
             connection.remote_next_sequence = segment.sequence_number.wrapping_add(1);
             connection.state = TcpConnectionState::Established;
+            connection.last_activity_tick = crate::timer::ticks();
             return Ok(TcpControlAction::SendAck {
                 sequence_number: connection.local_next_sequence,
                 acknowledgment_number: connection.remote_next_sequence,
             });
         }
-        if matches!(connection.state, TcpConnectionState::Established | TcpConnectionState::Closed)
-            && segment.sequence_number != connection.remote_next_sequence
+        if matches!(
+            connection.state,
+            TcpConnectionState::Established | TcpConnectionState::Closed
+        ) && segment.sequence_number != connection.remote_next_sequence
         {
             if segment.sequence_number < connection.remote_next_sequence {
                 self.duplicate_segments = self.duplicate_segments.saturating_add(1);
@@ -767,6 +795,7 @@ impl TcpConnectionTable {
                     return Err(TcpConnectionError::InvalidHandshake);
                 }
                 connection.state = TcpConnectionState::Established;
+                connection.last_activity_tick = crate::timer::ticks();
                 Ok(TcpControlAction::Established)
             }
             TcpConnectionState::Established => {
@@ -786,6 +815,7 @@ impl TcpConnectionTable {
                 }
                 connection.remote_next_sequence =
                     connection.remote_next_sequence.wrapping_add(consumed);
+                connection.last_activity_tick = crate::timer::ticks();
                 if !segment.payload.is_empty()
                     && connection.receive_queue.len() < TCP_RECEIVE_QUEUE_DEPTH
                 {
@@ -817,6 +847,55 @@ impl TcpConnectionTable {
             self.out_of_order_segments,
             self.receive_queue_drops,
         )
+    }
+
+    fn maintenance(&mut self, now: u64) -> Vec<TcpMaintenanceAction> {
+        let mut actions = Vec::new();
+        let mut index = 0;
+        while index < self.connections.len() {
+            let connection = &mut self.connections[index];
+            if !matches!(
+                connection.state,
+                TcpConnectionState::SynSent | TcpConnectionState::SynReceived
+            ) || now.saturating_sub(connection.last_activity_tick) < TCP_HANDSHAKE_TIMEOUT_TICKS
+            {
+                index += 1;
+                continue;
+            }
+            if connection.handshake_retries >= TCP_HANDSHAKE_RETRY_LIMIT {
+                self.connections.remove(index);
+                self.handshake_timeouts = self.handshake_timeouts.saturating_add(1);
+                continue;
+            }
+            let flags = if connection.state == TcpConnectionState::SynSent {
+                TCP_FLAG_SYN
+            } else {
+                TCP_FLAG_SYN | TCP_FLAG_ACK
+            };
+            actions.push(TcpMaintenanceAction {
+                info: TcpSendInfo {
+                    remote_ip: connection.remote_ip,
+                    remote_port: connection.remote_port,
+                    local_port: connection.local_port,
+                    sequence_number: connection.local_next_sequence.wrapping_sub(1),
+                    acknowledgment_number: if connection.state == TcpConnectionState::SynSent {
+                        0
+                    } else {
+                        connection.remote_next_sequence
+                    },
+                },
+                flags,
+            });
+            connection.handshake_retries = connection.handshake_retries.saturating_add(1);
+            connection.last_activity_tick = now;
+            self.handshake_retransmissions = self.handshake_retransmissions.saturating_add(1);
+            index += 1;
+        }
+        actions
+    }
+
+    fn lifecycle_counters(&self) -> (u64, u64) {
+        (self.handshake_retransmissions, self.handshake_timeouts)
     }
 }
 
@@ -1195,9 +1274,10 @@ pub fn tcp_connect(
     destination_port: u16,
     local_port: u16,
 ) -> Result<TcpSocketHandle, TcpSocketError> {
-    let (handle, info) = TCP_CONNECTIONS
-        .lock()
-        .connect(destination_ip, destination_port, local_port)?;
+    let (handle, info) =
+        TCP_CONNECTIONS
+            .lock()
+            .connect(destination_ip, destination_port, local_port)?;
     let sent = {
         let mut devices = DEVICES.lock();
         let Some(device) = devices
@@ -1297,6 +1377,25 @@ pub fn poll_runtime() {
             if !poll_receive_with_limit(device, 1) {
                 break;
             }
+        }
+    }
+    let actions = TCP_CONNECTIONS.lock().maintenance(crate::timer::ticks());
+    for action in actions {
+        if let Some(device) = devices.iter_mut().find(|device| {
+            device
+                .arp_cache
+                .is_some_and(|(ip, _)| ip == action.info.remote_ip)
+        }) {
+            submit_tcp_segment(
+                device,
+                action.info.remote_ip,
+                action.info.local_port,
+                action.info.remote_port,
+                action.info.sequence_number,
+                action.info.acknowledgment_number,
+                action.flags,
+                &[],
+            );
         }
     }
 }
@@ -1479,7 +1578,8 @@ pub fn init(
             poll_receive(&mut devices[1]);
             poll_receive(&mut devices[0]);
             poll_receive(&mut devices[1]);
-            let tcp_test_connection = tcp_test_listener.and_then(|listener| tcp_accept(listener).ok());
+            let tcp_test_connection =
+                tcp_test_listener.and_then(|listener| tcp_accept(listener).ok());
             let server_next_sequence = 0x5641_4e55;
             if submit_tcp_segment(
                 &mut devices[0],
@@ -1496,10 +1596,9 @@ pub fn init(
                 if let Some(connection) = tcp_test_connection
                     && let Ok(data) = tcp_receive(connection)
                 {
-                    devices[1].tcp_data_acked =
-                        data.remote_ip == devices[0].ipv4_address
-                            && data.remote_port == TCP_TEST_CLIENT_PORT
-                            && data.payload[..usize::from(data.payload_len)] == *TCP_TEST_PAYLOAD;
+                    devices[1].tcp_data_acked = data.remote_ip == devices[0].ipv4_address
+                        && data.remote_port == TCP_TEST_CLIENT_PORT
+                        && data.payload[..usize::from(data.payload_len)] == *TCP_TEST_PAYLOAD;
                 }
             }
             if submit_tcp_segment(
@@ -1868,8 +1967,7 @@ fn poll_receive_with_limit(device: &mut NetworkDevice, poll_limit: usize) -> boo
                 device.last_tcp_source_port = segment.source_port;
                 device.last_tcp_destination_port = segment.destination_port;
 
-                if segment.flags & (TCP_FLAG_SYN | TCP_FLAG_ACK)
-                    == (TCP_FLAG_SYN | TCP_FLAG_ACK)
+                if segment.flags & (TCP_FLAG_SYN | TCP_FLAG_ACK) == (TCP_FLAG_SYN | TCP_FLAG_ACK)
                     && segment.destination_port == TCP_TEST_CLIENT_PORT
                 {
                     device.tcp_established = submit_tcp_segment(
@@ -1885,9 +1983,7 @@ fn poll_receive_with_limit(device: &mut NetworkDevice, poll_limit: usize) -> boo
                 } else if segment.destination_port == TCP_TEST_CLIENT_PORT
                     && segment.flags & TCP_FLAG_ACK != 0
                 {
-                    let data_end = TCP_TEST_INITIAL_SEQUENCE
-                        + 1
-                        + TCP_TEST_PAYLOAD.len() as u32;
+                    let data_end = TCP_TEST_INITIAL_SEQUENCE + 1 + TCP_TEST_PAYLOAD.len() as u32;
                     if segment.acknowledgment_number == data_end {
                         device.tcp_data_acked = true;
                     } else if segment.acknowledgment_number == data_end + 1 {
@@ -2246,6 +2342,12 @@ pub fn write_devices_to_buffer(out: &mut [u8]) -> usize {
     writer.write_str(" queue_drops=");
     writer.write_dec(queue_drops);
     writer.write_byte(b'\n');
+    let (retransmissions, timeouts) = TCP_CONNECTIONS.lock().lifecycle_counters();
+    writer.write_str("TCP lifecycle: retransmissions=");
+    writer.write_dec(retransmissions);
+    writer.write_str(" timeouts=");
+    writer.write_dec(timeouts);
+    writer.write_byte(b'\n');
     writer.write_str(
         "BDF       VENDOR:DEVICE TYPE      DRIVER       BAR0             MMIO LINK MAC               RXQ TXQ DEPTH TXOK TXPACKETS RXOK RXPACKETS ETHFRAMES ETHERTYPE PROTOCOL IP ARPREQ ARPREPLY RESOLVED IPV4 CHECKSUM SOURCE DESTINATION IPPROTO UDP UDPCHECK SPORT DPORT UDPSEND SOCKET TCP TCPCHECK SPORT DPORT ESTABLISHED DATAACK CLOSED\n",
     );
@@ -2472,10 +2574,10 @@ mod tests {
         ARP_OPERATION_REPLY, ARP_OPERATION_REQUEST, ArpPacket, BufferWriter, DriverCandidate,
         ETHER_TYPE_ARP, ETHER_TYPE_IPV4, ETHER_TYPE_VANTARA_TEST, ETHERNET_MIN_FRAME_SIZE,
         EthernetError, EthernetFrame, EthernetProtocol, IP_PROTOCOL_UDP, IPV4_MAX_PACKET_SIZE,
-        Ipv4Error, Ipv4Packet, NetworkKind, ReceivedUdpDatagram, UDP_MAX_DATAGRAM_SIZE,
-        UDP_SOCKET_QUEUE_DEPTH, UdpDatagram, UdpError, UdpSocketError, UdpSocketTable,
-        TCP_FLAG_ACK, TCP_FLAG_SYN, TCP_MAX_SEGMENT_SIZE, TcpError, TcpSegment, driver_name,
-        TcpConnection, TcpConnectionState, TcpConnectionTable, TcpControlAction, TcpSocketError,
+        Ipv4Error, Ipv4Packet, NetworkKind, ReceivedUdpDatagram, TCP_FLAG_ACK, TCP_FLAG_SYN,
+        TCP_MAX_SEGMENT_SIZE, TcpConnection, TcpConnectionState, TcpConnectionTable,
+        TcpControlAction, TcpError, TcpSegment, TcpSocketError, UDP_MAX_DATAGRAM_SIZE,
+        UDP_SOCKET_QUEUE_DEPTH, UdpDatagram, UdpError, UdpSocketError, UdpSocketTable, driver_name,
         encode_ethernet_frame, encode_ipv4_packet, encode_tcp_segment, encode_udp_datagram,
         kind_name, protocol_name,
     };
@@ -2698,7 +2800,16 @@ mod tests {
         let destination = [10, 0, 2, 16];
         let mut bytes = [0; TCP_MAX_SEGMENT_SIZE];
         let length = encode_tcp_segment(
-            &mut bytes, source, destination, 1, 2, 1, 0, TCP_FLAG_SYN, 1024, b"",
+            &mut bytes,
+            source,
+            destination,
+            1,
+            2,
+            1,
+            0,
+            TCP_FLAG_SYN,
+            1024,
+            b"",
         )
         .unwrap();
         bytes[16] ^= 1;
@@ -2708,7 +2819,16 @@ mod tests {
         );
 
         let length = encode_tcp_segment(
-            &mut bytes, source, destination, 1, 2, 1, 0, TCP_FLAG_SYN, 1024, b"",
+            &mut bytes,
+            source,
+            destination,
+            1,
+            2,
+            1,
+            0,
+            TCP_FLAG_SYN,
+            1024,
+            b"",
         )
         .unwrap();
         bytes[12] = 4 << 4;
@@ -2718,7 +2838,16 @@ mod tests {
         );
         assert_eq!(
             encode_tcp_segment(
-                &mut bytes, source, destination, 0, 2, 1, 0, TCP_FLAG_SYN, 1024, b"",
+                &mut bytes,
+                source,
+                destination,
+                0,
+                2,
+                1,
+                0,
+                TCP_FLAG_SYN,
+                1024,
+                b"",
             ),
             Err(TcpError::InvalidPort)
         );
@@ -2734,7 +2863,16 @@ mod tests {
 
         let mut bytes = [0; TCP_MAX_SEGMENT_SIZE];
         let length = encode_tcp_segment(
-            &mut bytes, client_ip, server_ip, 40000, 8080, 100, 0, TCP_FLAG_SYN, 4096, b"",
+            &mut bytes,
+            client_ip,
+            server_ip,
+            40000,
+            8080,
+            100,
+            0,
+            TCP_FLAG_SYN,
+            4096,
+            b"",
         )
         .unwrap();
         let syn = TcpSegment::parse(client_ip, server_ip, &bytes[..length]).unwrap();
@@ -2814,6 +2952,8 @@ mod tests {
             state: TcpConnectionState::Established,
             accepted: true,
             receive_queue: alloc::vec::Vec::new(),
+            last_activity_tick: 0,
+            handshake_retries: 0,
         });
         let segment = |sequence_number, payload: &'static [u8]| TcpSegment {
             source_port: 40000,
@@ -2836,6 +2976,21 @@ mod tests {
         assert_eq!(table.hardening_counters(), (1, 1, 1));
         assert_eq!(table.connections[0].remote_next_sequence, 24);
         assert_eq!(table.connections[0].receive_queue.len(), 4);
+    }
+
+    #[test_case]
+    fn retransmits_and_expires_half_open_tcp_connection() {
+        let mut table = TcpConnectionTable::new();
+        table.connect([10, 0, 2, 99], 8080, 40100).unwrap();
+        table.connections[0].last_activity_tick = 0;
+        for deadline in [100, 200, 300] {
+            let actions = table.maintenance(deadline);
+            assert_eq!(actions.len(), 1);
+            assert_eq!(actions[0].flags, TCP_FLAG_SYN);
+        }
+        assert!(table.maintenance(400).is_empty());
+        assert!(table.connections.is_empty());
+        assert_eq!(table.lifecycle_counters(), (3, 1));
     }
 
     #[test_case]

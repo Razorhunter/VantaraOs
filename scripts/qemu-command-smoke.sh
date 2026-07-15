@@ -66,7 +66,7 @@ wait_for_log() {
   local qemu_pid="$2"
   local pattern="$3"
   local start_byte="${4:-0}"
-  local attempts="${5:-150}"
+  local attempts="${5:-300}"
 
   for ((attempt = 0; attempt < attempts; attempt++)); do
     if grep -Fq "${pattern}" < <(

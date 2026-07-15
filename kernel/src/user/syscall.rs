@@ -100,10 +100,17 @@ static SYSCALL_TRAPS: AtomicU64 = AtomicU64::new(0);
 static USER_YIELDS: AtomicU64 = AtomicU64::new(0);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum NetworkHandleKind { Udp, Tcp }
+enum NetworkHandleKind {
+    Udp,
+    Tcp,
+}
 
 #[derive(Debug, Clone, Copy)]
-struct OwnedNetworkHandle { pid: crate::user::process::Pid, handle: u64, kind: NetworkHandleKind }
+struct OwnedNetworkHandle {
+    pid: crate::user::process::Pid,
+    handle: u64,
+    kind: NetworkHandleKind,
+}
 
 static NETWORK_HANDLES: Mutex<[Option<OwnedNetworkHandle>; MAX_NETWORK_HANDLES]> =
     Mutex::new([None; MAX_NETWORK_HANDLES]);
@@ -111,7 +118,10 @@ static NETWORK_HANDLES: Mutex<[Option<OwnedNetworkHandle>; MAX_NETWORK_HANDLES]>
 fn register_network_handle(kind: NetworkHandleKind, handle: u64) -> Result<u64, SyscallError> {
     let pid = crate::user::process::current_user_pid().ok_or(SyscallError::InvalidArgument)?;
     let mut entries = NETWORK_HANDLES.lock();
-    let slot = entries.iter_mut().find(|entry| entry.is_none()).ok_or(SyscallError::WouldBlock)?;
+    let slot = entries
+        .iter_mut()
+        .find(|entry| entry.is_none())
+        .ok_or(SyscallError::WouldBlock)?;
     *slot = Some(OwnedNetworkHandle { pid, handle, kind });
     Ok(handle)
 }
@@ -130,13 +140,25 @@ fn track_tcp_handle(handle: crate::drivers::network::TcpSocketHandle) -> Result<
 
 fn validate_network_handle(kind: NetworkHandleKind, handle: u64) -> Result<(), SyscallError> {
     let pid = crate::user::process::current_user_pid().ok_or(SyscallError::InvalidArgument)?;
-    NETWORK_HANDLES.lock().iter().any(|entry| entry.is_some_and(|owned| owned.pid == pid && owned.handle == handle && owned.kind == kind))
-        .then_some(()).ok_or(SyscallError::PermissionDenied)
+    NETWORK_HANDLES
+        .lock()
+        .iter()
+        .any(|entry| {
+            entry.is_some_and(|owned| {
+                owned.pid == pid && owned.handle == handle && owned.kind == kind
+            })
+        })
+        .then_some(())
+        .ok_or(SyscallError::PermissionDenied)
 }
 
 fn forget_network_handle(kind: NetworkHandleKind, handle: u64) {
     let pid = crate::user::process::current_user_pid();
-    if let Some(entry) = NETWORK_HANDLES.lock().iter_mut().find(|entry| entry.is_some_and(|owned| Some(owned.pid) == pid && owned.handle == handle && owned.kind == kind)) {
+    if let Some(entry) = NETWORK_HANDLES.lock().iter_mut().find(|entry| {
+        entry.is_some_and(|owned| {
+            Some(owned.pid) == pid && owned.handle == handle && owned.kind == kind
+        })
+    }) {
         *entry = None;
     }
 }
@@ -1428,8 +1450,8 @@ fn tcp_listen_user(port: u64) -> Result<u64, SyscallError> {
 
 fn tcp_accept_user(handle: u64) -> Result<u64, SyscallError> {
     validate_network_handle(NetworkHandleKind::Tcp, handle)?;
-    let handle = crate::drivers::network::TcpSocketHandle::from_raw(handle)
-        .map_err(map_tcp_socket_error)?;
+    let handle =
+        crate::drivers::network::TcpSocketHandle::from_raw(handle).map_err(map_tcp_socket_error)?;
     crate::drivers::network::tcp_accept(handle)
         .map_err(map_tcp_socket_error)
         .and_then(track_tcp_handle)
@@ -1445,8 +1467,8 @@ fn tcp_connect_user(ip: u64, port: u64, local_port: u64) -> Result<u64, SyscallE
 
 fn tcp_send_user(handle: u64, ptr: u64, len: u64) -> Result<u64, SyscallError> {
     validate_network_handle(NetworkHandleKind::Tcp, handle)?;
-    let handle = crate::drivers::network::TcpSocketHandle::from_raw(handle)
-        .map_err(map_tcp_socket_error)?;
+    let handle =
+        crate::drivers::network::TcpSocketHandle::from_raw(handle).map_err(map_tcp_socket_error)?;
     let payload = read_user_bytes(ptr, len)?;
     crate::drivers::network::tcp_send(handle, payload)
         .map(|written| written as u64)
@@ -1455,8 +1477,8 @@ fn tcp_send_user(handle: u64, ptr: u64, len: u64) -> Result<u64, SyscallError> {
 
 fn tcp_recv_user(handle: u64, ptr: u64, len: u64) -> Result<u64, SyscallError> {
     validate_network_handle(NetworkHandleKind::Tcp, handle)?;
-    let handle = crate::drivers::network::TcpSocketHandle::from_raw(handle)
-        .map_err(map_tcp_socket_error)?;
+    let handle =
+        crate::drivers::network::TcpSocketHandle::from_raw(handle).map_err(map_tcp_socket_error)?;
     let out = user_write_range(ptr, len)?;
     let data = crate::drivers::network::tcp_receive(handle).map_err(map_tcp_socket_error)?;
     let payload_len = usize::from(data.payload_len);
@@ -1469,8 +1491,8 @@ fn tcp_recv_user(handle: u64, ptr: u64, len: u64) -> Result<u64, SyscallError> {
 
 fn tcp_close_user(handle: u64) -> Result<u64, SyscallError> {
     validate_network_handle(NetworkHandleKind::Tcp, handle)?;
-    let handle = crate::drivers::network::TcpSocketHandle::from_raw(handle)
-        .map_err(map_tcp_socket_error)?;
+    let handle =
+        crate::drivers::network::TcpSocketHandle::from_raw(handle).map_err(map_tcp_socket_error)?;
     crate::drivers::network::tcp_close(handle)
         .map(|_| 0)
         .map_err(map_tcp_socket_error)
@@ -1480,12 +1502,15 @@ fn tcp_close_user(handle: u64) -> Result<u64, SyscallError> {
 fn map_tcp_socket_error(error: crate::drivers::network::TcpSocketError) -> SyscallError {
     use crate::drivers::network::TcpSocketError;
     match error {
-        TcpSocketError::WouldBlock | TcpSocketError::SocketLimit | TcpSocketError::NoRoute
-        | TcpSocketError::TransmitFailed | TcpSocketError::NotConnected => SyscallError::WouldBlock,
-        TcpSocketError::InvalidPort | TcpSocketError::AddressInUse
-        | TcpSocketError::InvalidHandle | TcpSocketError::PayloadTooLarge => {
-            SyscallError::InvalidArgument
-        }
+        TcpSocketError::WouldBlock
+        | TcpSocketError::SocketLimit
+        | TcpSocketError::NoRoute
+        | TcpSocketError::TransmitFailed
+        | TcpSocketError::NotConnected => SyscallError::WouldBlock,
+        TcpSocketError::InvalidPort
+        | TcpSocketError::AddressInUse
+        | TcpSocketError::InvalidHandle
+        | TcpSocketError::PayloadTooLarge => SyscallError::InvalidArgument,
     }
 }
 
@@ -2381,12 +2406,16 @@ pub fn close_process_files(pid: crate::user::process::Pid) {
         {
             match owned.kind {
                 NetworkHandleKind::Udp => {
-                    if let Ok(handle) = crate::drivers::network::UdpSocketHandle::from_raw(owned.handle) {
+                    if let Ok(handle) =
+                        crate::drivers::network::UdpSocketHandle::from_raw(owned.handle)
+                    {
                         let _ = crate::drivers::network::udp_close(handle);
                     }
                 }
                 NetworkHandleKind::Tcp => {
-                    if let Ok(handle) = crate::drivers::network::TcpSocketHandle::from_raw(owned.handle) {
+                    if let Ok(handle) =
+                        crate::drivers::network::TcpSocketHandle::from_raw(owned.handle)
+                    {
                         let _ = crate::drivers::network::tcp_close(handle);
                     }
                 }

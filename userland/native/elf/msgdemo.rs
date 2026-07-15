@@ -53,7 +53,14 @@ pub extern "C" fn _start() -> ! {
         abi::write("msgdemo: first message mismatch\n");
         abi::exit(5);
     }
-    let second = abi::msgq_receive(queue as u64, &mut buffer);
+    let second = loop {
+        let result = abi::msgq_receive(queue as u64, &mut buffer);
+        if result == abi::ERR_WOULD_BLOCK {
+            abi::yield_now();
+            continue;
+        }
+        break result;
+    };
     if second != 4 || &buffer[..4] != b"beta" {
         abi::write("msgdemo: second message mismatch\n");
         abi::exit(6);

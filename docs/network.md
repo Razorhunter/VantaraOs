@@ -120,3 +120,9 @@ without delivering bytes or advancing state. A full receive queue similarly
 keeps the sequence unchanged so the sender can retry after userland drains the
 queue. Duplicate, out-of-order, and queue-drop counters are visible in
 `/Devices/net` under `TCP hardening`.
+
+Half-open `SYN-SENT` and `SYN-RECEIVED` entries now use a one-second retry
+deadline, retransmit at most three times, and are then removed from the bounded
+connection table. Runtime polling performs this maintenance outside interrupt
+context. `/Devices/net` exposes cumulative retransmission and timeout counters
+under `TCP lifecycle`.

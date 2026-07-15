@@ -432,11 +432,25 @@ pub fn tcp_connect(ip: [u8; 4], port: u16, local_port: u16) -> i64 {
 }
 
 pub fn tcp_send(handle: u64, payload: &[u8]) -> i64 {
-    unsafe { syscall3(SYS_TCP_SEND, handle, payload.as_ptr() as u64, payload.len() as u64) as i64 }
+    unsafe {
+        syscall3(
+            SYS_TCP_SEND,
+            handle,
+            payload.as_ptr() as u64,
+            payload.len() as u64,
+        ) as i64
+    }
 }
 
 pub fn tcp_receive(handle: u64, out: &mut [u8]) -> i64 {
-    unsafe { syscall3(SYS_TCP_RECV, handle, out.as_mut_ptr() as u64, out.len() as u64) as i64 }
+    unsafe {
+        syscall3(
+            SYS_TCP_RECV,
+            handle,
+            out.as_mut_ptr() as u64,
+            out.len() as u64,
+        ) as i64
+    }
 }
 
 pub fn tcp_close(handle: u64) -> i64 {
