@@ -11,6 +11,8 @@ pub extern "C" fn kernel_event_thread() -> ! {
 pub fn run_event_loop() -> ! {
     loop {
         crate::drivers::network::poll_runtime();
+        crate::drivers::usb_host::poll_runtime();
+        crate::drivers::xhci::poll_runtime();
 
         if let Some(event) = crate::input::dequeue_event() {
             if DEBUG_INPUT_EVENTS {

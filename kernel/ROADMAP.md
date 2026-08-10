@@ -151,12 +151,16 @@ dan user mode.
   - [x] scan bus/device/function
   - [x] list vendor/device/class
   - [x] expose device table
-- [ ] USB roadmap split:
+- [x] USB roadmap split:
   - [x] detect UHCI via PCI instead of hardcoded I/O base
   - [x] initialize controller only if found
   - [x] enumerate root ports
-  - [ ] parse descriptors
-  - [ ] support HID keyboard/mouse later
+  - [x] parse descriptors
+  - [x] support HID keyboard/mouse:
+    - [x] Detect boot keyboard/mouse interface dan interrupt-IN endpoint daripada descriptor.
+    - [x] Poll UHCI interrupt-IN dengan DATA toggle, interval, timeout, dan disconnect handling.
+    - [x] Route keyboard/mouse boot reports kepada kernel input queue.
+    - [x] Luluskan QEMU USB keyboard + mouse input regression.
 
 ## Milestone 9: Storage And Filesystem
 
@@ -774,18 +778,69 @@ Deferred filesystem hardening:
       - [x] Reclaim semua socket milik proses secara automatik apabila proses exit.
       - [x] Add duplicate/out-of-order TCP sequence handling dan bounded receive-queue backpressure counters.
       - [x] Add bounded SYN/SYN-ACK retransmission dan timeout cleanup untuk half-open connections.
-- [ ] USB maturity:
+- [x] USB read-only baseline:
   - [x] USB HID keyboard/mouse baseline.
-  - [ ] USB mass storage:
-    - [ ] Detect mass-storage interface class `08/06/50`.
-    - [ ] Implement Bulk-Only Transport CBW/CSW transaction baseline.
-    - [ ] Implement SCSI INQUIRY dan TEST UNIT READY.
-    - [ ] Implement READ CAPACITY(10) dan READ(10).
-    - [ ] Expose read-only USB mass-storage `BlockDevice` dan diagnostics.
-    - [ ] Tambah QEMU USB-storage discovery/read regression.
-- [ ] Graphics mode selepas VGA text:
-  - [ ] framebuffer
-  - [ ] compositor/server prototype
+  - [x] UHCI transaction engine:
+    - [x] Enable PCI I/O-space dan bus mastering untuk UHCI.
+    - [x] Allocate DMA32 frame list, queue head, TD arena, dan data page.
+    - [x] Program valid idle 1024-entry UHCI schedule sebelum controller run.
+    - [x] Implement bounded synchronous TD-chain submission, data-toggle tracking, dan completion/error decode.
+    - [x] Reset port dan enumerate device melalui endpoint-zero control transfers (`GET_DESCRIPTOR`, `SET_ADDRESS`, `SET_CONFIGURATION`).
+  - [x] USB mass storage:
+    - [x] Detect mass-storage interface class `08/06/50` dan pasangan endpoint Bulk IN/OUT.
+    - [x] Implement Bulk-Only Transport CBW/data/CSW transaction baseline dengan tag dan residue validation.
+    - [x] Implement SCSI INQUIRY dan TEST UNIT READY di atas Bulk-Only Transport.
+    - [x] Implement READ CAPACITY(10) dan bounded READ(10) read-only path.
+    - [x] Expose read-only USB mass-storage `BlockDevice` adapter dan `/dev/usb-storage` diagnostics.
+    - [x] Tambah QEMU USB-storage discovery/read regression:
+      - [x] Sediakan isolated UHCI + USB-storage image test untuk enumeration, capacity, dan LBA 0 marker.
+      - [x] Luluskan regression dalam Docker/QEMU dengan UHCI enumeration, SCSI capacity, dan LBA 0 read.
+- [x] Advanced USB maturity:
+  - [x] Implement SCSI `REQUEST SENSE`, `WRITE(10)`, dan `SYNCHRONIZE CACHE(10)` primitives.
+  - [x] Sediakan opt-in writable `BlockDevice` dengan flush selepas setiap sector write.
+  - [x] Tambah dan luluskan QEMU USB write + flush persistence regression merentas reboot.
+  - [x] Implement Bulk-Only reset recovery, clear Bulk IN/OUT endpoint stall, dan reset DATA toggle selepas phase/transfer failure.
+  - [x] Tambah close/eject lifecycle, runtime port polling, handle invalidation, dan luluskan safe hot-unplug QEMU regression.
+  - [x] Tambah EHCI/xHCI untuk USB 2.0/3.x dan hardware moden:
+    - [x] Detect/map EHCI USB 2.0 capability/operational registers dengan `/dev/ehci` diagnostics dan QEMU discovery regression.
+    - [x] Implement EHCI asynchronous schedule/QTD transfers dan companion-port handoff.
+    - [x] Tambah xHCI USB 3.x controller dan transfer-ring path:
+      - [x] Detect/map xHCI capability, operational, runtime dan doorbell registers.
+      - [x] Initialize DCBAA, command ring, event ring, dan baseline transfer ring.
+      - [x] Tambah `/dev/xhci` diagnostics dan QEMU xHCI ring bring-up regression.
+    - [x] Enumerate high-speed USB device melalui EHCI qTD dan configure endpoint-zero sebenar.
+    - [x] Implement xHCI command/device lifecycle:
+      - [x] Implement command-ring doorbell dan polled command-completion event consumer.
+      - [x] Implement `Enable Slot` dan `Address Device` dengan input/output context.
+      - [x] Fetch descriptors melalui endpoint zero dan implement `Configure Endpoint`.
+    - [x] Validate data transfer end-to-end melalui EHCI dan xHCI dalam QEMU:
+      - [x] EHCI Bulk-Only/SCSI `INQUIRY` melalui Bulk OUT/IN qTD dan CSW validation.
+      - [x] xHCI keyboard interrupt-IN Normal TRB hingga kernel input queue.
+- [x] Graphics Baseline [COMPLETE]:
+  - [x] framebuffer foundation:
+    - [x] Tambah opt-in VGA mode 13h linear framebuffer (`320x200x8`).
+    - [x] Implement bounded pixel, clear, rectangle, dan checksum primitives.
+    - [x] Expose `/dev/fb0` geometry/write/clip/checksum diagnostics.
+    - [x] Luluskan QEMU deterministic framebuffer render regression.
+  - [x] compositor/server prototype:
+    - [x] Surface registry dengan visibility dan z-order.
+    - [x] Backbuffer composition dan bounded damage-region redraw.
+    - [x] Cursor sebagai lapisan compositor teratas.
+    - [x] Expose `/dev/compositor` frame/surface/damage/checksum diagnostics.
+    - [x] Luluskan QEMU deterministic compositor regression.
+- [ ] Advanced Graphics And Display Stack:
+  - [x] Generic kernel display/KMS-style API:
+    - [x] Model backend-neutral untuk display mode, stride, refresh rate, dan pixel format.
+    - [x] Scanout-buffer allocation serta presentation/page-flip accounting.
+    - [x] Pisahkan compositor daripada backend VGA melalui generic display API.
+    - [x] Expose `/dev/display0` mode/buffer/flip/checksum diagnostics.
+    - [x] Luluskan QEMU regression untuk display API, framebuffer, dan compositor.
+  - [ ] UEFI GOP/VBE backend untuk framebuffer dinamik 24/32-bit.
+  - [ ] EDID, output discovery, dan pemilihan mode paparan.
+  - [ ] VirtIO-GPU PCI, control queue, resource, dan scanout backend.
+  - [ ] Shared graphics buffers untuk proses user, fence, dan isolation.
+  - [ ] Migrasi display server/compositor ke user mode.
+  - [ ] Window protocol, input focus, font rendering, dan GUI toolkit.
 
 ### Phase E: Security, Users, And Compatibility
 

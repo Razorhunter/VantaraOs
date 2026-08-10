@@ -3,13 +3,16 @@ kernel/src/allocator/bump.rs	4
 kernel/src/allocator/fixed_size_block.rs	7
 kernel/src/allocator/linked_list.rs	9
 kernel/src/drivers/ahci.rs	6
+kernel/src/drivers/ehci.rs	8
+kernel/src/drivers/framebuffer.rs	3
 kernel/src/drivers/keyboard.rs	1
 kernel/src/drivers/mouse.rs	5
 kernel/src/drivers/network.rs	5
 kernel/src/drivers/nvme.rs	6
 kernel/src/drivers/pci.rs	2
 kernel/src/drivers/ps2.rs	7
-kernel/src/drivers/usb_host.rs	4
+kernel/src/drivers/usb_host.rs	28
+kernel/src/drivers/xhci.rs	17
 kernel/src/gdt.rs	1
 kernel/src/interrupts.rs	9
 kernel/src/lib.rs	3

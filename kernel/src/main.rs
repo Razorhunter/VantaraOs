@@ -96,12 +96,17 @@ fn kernel_main(boot_info: &'static BootInfo) -> ! {
 
     allocator::init_heap(&mut mapper, &mut frame_allocator).expect("heap initialization failed");
     kernel::diagnostics::mark_heap();
+    kernel::drivers::framebuffer::init();
+    kernel::drivers::display::init();
+    kernel::drivers::compositor::init();
     kernel::user::init();
     kernel::scheduler::SCHEDULER.create_idle_task();
     kernel::drivers::pci::init();
     kernel::drivers::ahci::init(&mut mapper, &mut frame_allocator, phys_mem_offset);
     kernel::drivers::nvme::init(&mut mapper, &mut frame_allocator, phys_mem_offset);
     kernel::drivers::network::init(&mut mapper, &mut frame_allocator, phys_mem_offset);
+    kernel::drivers::ehci::init(&mut mapper, &mut frame_allocator, phys_mem_offset);
+    kernel::drivers::xhci::init(&mut mapper, &mut frame_allocator, phys_mem_offset);
     match kernel::user::ring3::map_first_user_task(&mut mapper, &mut frame_allocator) {
         Ok(()) => serial_println!("[USER] first Ring-3 task image and stack mapped"),
         Err(err) => serial_println!("[USER] first Ring-3 task mapping skipped: {:?}", err),
@@ -187,7 +192,9 @@ fn kernel_main(boot_info: &'static BootInfo) -> ! {
     kernel::drivers::nvme::run_write_test();
     #[cfg(feature = "ahci-vantfs-test")]
     kernel::fs::run_ahci_vantfs_test();
-    kernel::drivers::usb_host::init_usb();
+    kernel::drivers::usb_host::init_usb(&mut frame_allocator, phys_mem_offset);
+    #[cfg(feature = "usb-write-test")]
+    kernel::drivers::usb_host::run_write_test();
     kernel::diagnostics::mark_usb();
     match kernel::user::program::request_boot_init() {
         Ok(pid) => serial_println!("[USER] boot policy queued /bin/init pid={}", pid),

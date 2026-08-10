@@ -153,6 +153,18 @@ pub fn enable_memory_and_bus_master(device: PciDevice) {
     );
 }
 
+pub fn enable_io_and_bus_master(device: PciDevice) {
+    let command_status = read_config_u32(device.bus, device.slot, device.function, 0x04);
+    let command = (command_status as u16) | (1 << 0) | (1 << 2);
+    write_config_u32(
+        device.bus,
+        device.slot,
+        device.function,
+        0x04,
+        (command_status & 0xffff_0000) | u32::from(command),
+    );
+}
+
 fn decode_bar(low: u32, high: u32, has_high: bool) -> PciBar {
     if low == 0 {
         return PciBar::Unused;
@@ -235,7 +247,7 @@ fn read_header_type(bus: u8, slot: u8, function: u8) -> u8 {
     (read_config_u32(bus, slot, function, 0x0c) >> 16) as u8
 }
 
-fn read_config_u32(bus: u8, slot: u8, function: u8, offset: u8) -> u32 {
+pub(crate) fn read_config_u32(bus: u8, slot: u8, function: u8, offset: u8) -> u32 {
     let address = 0x8000_0000u32
         | ((bus as u32) << 16)
         | ((slot as u32) << 11)
@@ -251,7 +263,7 @@ fn read_config_u32(bus: u8, slot: u8, function: u8, offset: u8) -> u32 {
     }
 }
 
-fn write_config_u32(bus: u8, slot: u8, function: u8, offset: u8, value: u32) {
+pub(crate) fn write_config_u32(bus: u8, slot: u8, function: u8, offset: u8, value: u32) {
     let address = 0x8000_0000u32
         | ((bus as u32) << 16)
         | ((slot as u32) << 11)

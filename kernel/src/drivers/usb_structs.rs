@@ -132,11 +132,11 @@ impl UhciTransferDescriptor {
     }
 
     pub fn set_active(&mut self) {
-        self.control_status |= 0x80000000;
+        self.control_status |= 1 << 23;
     }
 
     pub fn is_active(&self) -> bool {
-        (self.control_status & 0x80000000) != 0
+        (self.control_status & (1 << 23)) != 0
     }
 
     pub fn get_status(&self) -> u8 {

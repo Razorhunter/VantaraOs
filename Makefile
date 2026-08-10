@@ -52,6 +52,7 @@ COMMAND_SMOKE_TARGETS := $(addprefix command-smoke-,$(COMMAND_SMOKE_CASES))
 	persist-disk reset-persist \
 	smoke boot-test command-smoke $(COMMAND_SMOKE_TARGETS) \
 	service-manager-test device-namespace-test network-rx-test \
+	usb-storage-test usb-write-test usb-lifecycle-test usb-hid-test ehci-test xhci-test xhci-hid-test framebuffer-test \
 	filesystem-write-test filesystem-persistence-test block-cache-test partition-test \
 	ahci-test ahci-write-test ahci-vantfs-test ahci-persist-test storage-policy-test nvme-test nvme-write-test preemption-test \
 	kernel-thread-preemption-test signal-test terminal-signal-test isolation-test \
@@ -79,6 +80,14 @@ help:
 	@echo "  make service-manager-test"
 	@echo "  make device-namespace-test"
 	@echo "  make network-rx-test"
+	@echo "  make usb-storage-test"
+	@echo "  make usb-write-test"
+	@echo "  make usb-lifecycle-test"
+	@echo "  make usb-hid-test"
+	@echo "  make ehci-test"
+	@echo "  make xhci-test"
+	@echo "  make xhci-hid-test"
+	@echo "  make framebuffer-test"
 	@echo "  make command-smoke"
 	@echo "  make filesystem-write-test"
 	@echo "  make filesystem-persistence-test"
@@ -239,6 +248,30 @@ device-namespace-test: kernel-build
 
 network-rx-test: kernel-build
 	QEMU="$(QEMU)" bash scripts/qemu-network-rx.sh
+
+usb-storage-test: kernel-build
+	QEMU="$(QEMU)" bash scripts/qemu-usb-storage.sh
+
+usb-write-test: userland-bin
+	QEMU="$(QEMU)" bash scripts/qemu-usb-write-persistence.sh
+
+usb-lifecycle-test: kernel-build
+	QEMU="$(QEMU)" bash scripts/qemu-usb-lifecycle.sh
+
+usb-hid-test: kernel-build
+	QEMU="$(QEMU)" bash scripts/qemu-usb-hid.sh
+
+ehci-test: kernel-build
+	QEMU="$(QEMU)" bash scripts/qemu-ehci-discovery.sh
+
+xhci-test: kernel-build
+	QEMU="$(QEMU)" bash scripts/qemu-xhci-discovery.sh
+
+xhci-hid-test: kernel-build
+	QEMU="$(QEMU)" bash scripts/qemu-xhci-hid.sh
+
+framebuffer-test:
+	QEMU="$(QEMU)" bash scripts/qemu-framebuffer.sh
 
 command-smoke: kernel-build
 	QEMU="$(QEMU)" bash scripts/qemu-command-smoke.sh
