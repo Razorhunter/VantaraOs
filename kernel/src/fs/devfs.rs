@@ -16,6 +16,7 @@ const XHCI_INODE: u64 = 13;
 const FRAMEBUFFER_INODE: u64 = 14;
 const COMPOSITOR_INODE: u64 = 15;
 const DISPLAY_INODE: u64 = 16;
+const VIRTIO_GPU_INODE: u64 = 17;
 const SNAPSHOT_SIZE: usize = 2048;
 
 pub struct DeviceFilesystem;
@@ -32,7 +33,7 @@ impl DeviceFilesystem {
             "mounted at /dev",
         );
         crate::serial_println!(
-            "[DEVFS] ready: nodes=null,zero,drivers,pci,net,block-cache,partitions,ahci,nvme,usb-storage,ehci,xhci,fb0,compositor,display0"
+            "[DEVFS] ready: nodes=null,zero,drivers,pci,net,block-cache,partitions,ahci,nvme,usb-storage,ehci,xhci,fb0,compositor,display0,virtio-gpu"
         );
     }
 }
@@ -63,6 +64,7 @@ impl FilesystemBackend for DeviceFilesystem {
             "fb0",
             "compositor",
             "display0",
+            "virtio-gpu",
         ] {
             written = append_line(out, written, name.as_bytes())?;
         }
@@ -71,7 +73,7 @@ impl FilesystemBackend for DeviceFilesystem {
 
     fn stat(&self, path: &str) -> Result<BackendStat, FsError> {
         let (file_type, size, readonly, inode) = match path {
-            "/" => (FileType::Directory, 15, true, ROOT_INODE),
+            "/" => (FileType::Directory, 16, true, ROOT_INODE),
             "/null" => (FileType::File, 0, false, NULL_INODE),
             "/zero" => (FileType::File, 0, false, ZERO_INODE),
             "/drivers" => (
@@ -152,6 +154,12 @@ impl FilesystemBackend for DeviceFilesystem {
                 true,
                 DISPLAY_INODE,
             ),
+            "/virtio-gpu" => (
+                FileType::File,
+                snapshot_len(crate::drivers::virtio_gpu::write_to_buffer),
+                true,
+                VIRTIO_GPU_INODE,
+            ),
             _ => return Err(FsError::NotFound),
         };
         Ok(BackendStat {
@@ -200,6 +208,9 @@ impl FilesystemBackend for DeviceFilesystem {
                 read_snapshot(offset, out, crate::drivers::compositor::write_to_buffer)
             }
             DISPLAY_INODE => read_snapshot(offset, out, crate::drivers::display::write_to_buffer),
+            VIRTIO_GPU_INODE => {
+                read_snapshot(offset, out, crate::drivers::virtio_gpu::write_to_buffer)
+            }
             ROOT_INODE => Err(FsError::IsDirectory),
             _ => Err(FsError::NotFound),
         }
@@ -210,7 +221,9 @@ impl FilesystemBackend for DeviceFilesystem {
             NULL_INODE | ZERO_INODE => Ok(source.len()),
             DRIVERS_INODE | PCI_INODE | NET_INODE | BLOCK_CACHE_INODE | PARTITIONS_INODE
             | AHCI_INODE | NVME_INODE | USB_STORAGE_INODE | EHCI_INODE | XHCI_INODE
-            | FRAMEBUFFER_INODE | COMPOSITOR_INODE | DISPLAY_INODE => Err(FsError::ReadOnly),
+            | FRAMEBUFFER_INODE | COMPOSITOR_INODE | DISPLAY_INODE | VIRTIO_GPU_INODE => {
+                Err(FsError::ReadOnly)
+            }
             ROOT_INODE => Err(FsError::IsDirectory),
             _ => Err(FsError::NotFound),
         }
@@ -263,11 +276,11 @@ mod tests {
     #[test_case]
     fn lists_stable_device_nodes() {
         let devfs = DeviceFilesystem::new();
-        let mut out = [0u8; 128];
+        let mut out = [0u8; 160];
         let len = devfs.list("/", &mut out).unwrap();
         assert_eq!(
             &out[..len],
-            b"null\nzero\ndrivers\npci\nnet\nblock-cache\npartitions\nahci\nnvme\nusb-storage\nehci\nxhci\nfb0\ncompositor\ndisplay0\n"
+            b"null\nzero\ndrivers\npci\nnet\nblock-cache\npartitions\nahci\nnvme\nusb-storage\nehci\nxhci\nfb0\ncompositor\ndisplay0\nvirtio-gpu\n"
         );
     }
 

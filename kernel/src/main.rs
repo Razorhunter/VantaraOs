@@ -198,6 +198,7 @@ fn kernel_main(
     kernel::user::init();
     kernel::scheduler::SCHEDULER.create_idle_task();
     kernel::drivers::pci::init();
+    kernel::drivers::virtio_gpu::init(phys_mem_offset, &mut frame_allocator);
     kernel::drivers::ahci::init(&mut mapper, &mut frame_allocator, phys_mem_offset);
     kernel::drivers::nvme::init(&mut mapper, &mut frame_allocator, phys_mem_offset);
     kernel::drivers::network::init(&mut mapper, &mut frame_allocator, phys_mem_offset);

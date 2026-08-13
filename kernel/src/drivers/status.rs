@@ -1,7 +1,7 @@
 use crate::sync::PreemptMutex as Mutex;
 use lazy_static::lazy_static;
 
-const MAX_DRIVER_STATUSES: usize = 16;
+const MAX_DRIVER_STATUSES: usize = 24;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DriverState {

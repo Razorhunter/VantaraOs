@@ -53,7 +53,7 @@ COMMAND_SMOKE_TARGETS := $(addprefix command-smoke-,$(COMMAND_SMOKE_CASES))
 	persist-disk reset-persist \
 	smoke boot-test command-smoke $(COMMAND_SMOKE_TARGETS) \
 	service-manager-test device-namespace-test network-rx-test \
-	usb-storage-test usb-write-test usb-lifecycle-test usb-hid-test ehci-test xhci-test xhci-hid-test framebuffer-test uefi-framebuffer-test modern-boot docker-modern-boot \
+	usb-storage-test usb-write-test usb-lifecycle-test usb-hid-test ehci-test xhci-test xhci-hid-test framebuffer-test uefi-framebuffer-test virtio-gpu-test modern-boot docker-modern-boot \
 	filesystem-write-test filesystem-persistence-test block-cache-test partition-test \
 	ahci-test ahci-write-test ahci-vantfs-test ahci-persist-test storage-policy-test nvme-test nvme-write-test preemption-test \
 	kernel-thread-preemption-test signal-test terminal-signal-test isolation-test \
@@ -92,6 +92,7 @@ help:
 	@echo "  make modern-boot          Build BIOS and UEFI images with framebuffer handoff"
 	@echo "  make docker-modern-boot   Build modern images using the pinned toolchain"
 	@echo "  make uefi-framebuffer-test"
+	@echo "  make virtio-gpu-test"
 	@echo "  make command-smoke"
 	@echo "  make filesystem-write-test"
 	@echo "  make filesystem-persistence-test"
@@ -287,6 +288,9 @@ docker-modern-boot:
 
 uefi-framebuffer-test: userland-bin
 	QEMU="$(QEMU)" bash scripts/qemu-uefi-framebuffer.sh
+
+virtio-gpu-test: kernel-build
+	QEMU="$(QEMU)" bash scripts/qemu-virtio-gpu-discovery.sh
 
 command-smoke: kernel-build
 	QEMU="$(QEMU)" bash scripts/qemu-command-smoke.sh

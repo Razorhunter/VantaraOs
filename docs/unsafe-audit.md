@@ -15,7 +15,7 @@ through validated APIs rather than dereferencing arbitrary addresses directly.
 | ELF loading | `user/elf.rs`, `user/loader.rs` | ELF headers and segment bounds are validated before copying; destinations stay inside prepared user mappings. |
 | Allocators | `allocator/*` | Heap range is mapped once, aligned, exclusively allocator-owned, and free-list nodes describe valid non-overlapping regions. |
 | Interrupts and CPU tables | `interrupts.rs`, `gdt.rs` | IDT/GDT/TSS live for the kernel lifetime; custom entry stubs preserve the documented register/CPU frame layout; handler signatures match CPU frames; PIC access uses configured ports and offsets. |
-| Device I/O | `drivers/*`, `serial.rs`, `timer.rs`, `power.rs`, `vga_buffer.rs` | Fixed ports/MMIO addresses match the selected x86 platform and access is serialized by the owning driver or lock. |
+| Device I/O | `drivers/*`, `serial.rs`, `timer.rs`, `power.rs`, `vga_buffer.rs` | Fixed ports/MMIO addresses match the selected x86 platform and access is serialized by the owning driver or lock. VirtIO capability bounds and register alignment are validated before volatile MMIO, and queue frames remain device-owned after enable. |
 
 ## Review Rules
 

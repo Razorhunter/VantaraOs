@@ -1,6 +1,7 @@
 pub mod ahci;
 pub mod compositor;
 pub mod display;
+pub mod edid;
 pub mod ehci;
 pub mod framebuffer;
 pub mod keyboard;
@@ -17,4 +18,5 @@ pub mod usb_host;
 pub mod usb_mass_storage;
 pub mod usb_scsi;
 pub mod usb_structs;
+pub mod virtio_gpu;
 pub mod xhci;

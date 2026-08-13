@@ -10,9 +10,10 @@ mod abi {
 
 const LOGIN_PATH: &[u8] = b"/bin/login";
 const RESTART_DELAY_MS: u64 = 250;
-const DISPLAY_NODES: [(&str, &str); 2] = [
+const DISPLAY_NODES: [(&str, &str); 3] = [
     ("/dev/fb0", "[init-display] fb0 "),
     ("/dev/display0", "[init-display] display0 "),
+    ("/dev/virtio-gpu", "[init-display] virtio-gpu "),
 ];
 
 #[unsafe(no_mangle)]

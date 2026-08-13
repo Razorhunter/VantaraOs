@@ -33,6 +33,8 @@ pub struct DisplayInfo {
     pub page_flips: u64,
     pub rejected_flips: u64,
     pub last_checksum: u32,
+    pub output_count: u8,
+    pub edid_available: bool,
 }
 
 const EMPTY_MODE: DisplayMode = DisplayMode {
@@ -52,6 +54,8 @@ static DISPLAY: Mutex<DisplayInfo> = Mutex::new(DisplayInfo {
     page_flips: 0,
     rejected_flips: 0,
     last_checksum: 0,
+    output_count: 0,
+    edid_available: false,
 });
 
 pub fn init() {
@@ -85,6 +89,8 @@ pub fn init() {
         page_flips: 0,
         rejected_flips: 0,
         last_checksum: framebuffer.checksum,
+        output_count: 1,
+        edid_available: false,
     };
     crate::drivers::status::report(
         "display",
@@ -96,7 +102,7 @@ pub fn init() {
         },
     );
     crate::serial_println!(
-        "[DISPLAY] backend={:?} mode={}x{} stride={} bpp={} refresh-millihertz={}",
+        "[DISPLAY] backend={:?} mode={}x{} stride={} bpp={} refresh-millihertz={} outputs=1 output=firmware-primary edid=unavailable",
         backend,
         mode.width,
         mode.height,
@@ -170,6 +176,20 @@ pub fn write_to_buffer(out: &mut [u8]) -> usize {
     writer.dec(display.rejected_flips);
     writer.text(" checksum=0x");
     writer.hex(u64::from(display.last_checksum), 8);
+    writer.text(" outputs=");
+    writer.dec(u64::from(display.output_count));
+    writer.text(" output=");
+    writer.text(if display.output_count == 0 {
+        "none"
+    } else {
+        "firmware-primary"
+    });
+    writer.text(" edid=");
+    writer.text(if display.edid_available {
+        "available"
+    } else {
+        "unavailable"
+    });
     writer.byte(b'\n');
     writer.len
 }

@@ -72,6 +72,10 @@ pub fn devices_by_class(class_code: u8) -> Vec<PciDevice> {
         .collect()
 }
 
+pub fn devices() -> Vec<PciDevice> {
+    DEVICES.lock().clone()
+}
+
 pub fn write_devices_to_buffer(out: &mut [u8]) -> usize {
     let devices = DEVICES.lock();
     let mut writer = BufferWriter::new(out);
@@ -261,6 +265,11 @@ pub(crate) fn read_config_u32(bus: u8, slot: u8, function: u8, offset: u8) -> u3
         address_port.write(address);
         data_port.read()
     }
+}
+
+pub(crate) fn read_config_u8(device: PciDevice, offset: u8) -> u8 {
+    let value = read_config_u32(device.bus, device.slot, device.function, offset & !0x03);
+    ((value >> (u32::from(offset & 0x03) * 8)) & 0xff) as u8
 }
 
 pub(crate) fn write_config_u32(bus: u8, slot: u8, function: u8, offset: u8, value: u32) {

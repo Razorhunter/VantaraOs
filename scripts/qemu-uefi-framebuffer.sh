@@ -87,6 +87,7 @@ fi
 wait_for_log "[init-display] fb0 ready=1 address="
 grep -Eq '\[init-display\] fb0 ready=1 address=0x[0-9a-f]+ width=1280 height=800 stride=5120 bpp=32 .*checksum=0x[0-9a-f]*[1-9a-f][0-9a-f]*' "${LOG_FILE}" || fail "PID 1 framebuffer snapshot mismatch"
 wait_for_log "[init-display] display0 ready=1 backend=uefi-gop mode=1280x800 stride=5120 bpp=32 buffers=1 flips=2 rejected=0"
+grep -Eq '\[init-display\] display0 .*outputs=1 output=firmware-primary edid=unavailable' "${LOG_FILE}" || fail "PID 1 output discovery snapshot mismatch"
 wait_for_log "login: "
 
 printf 'quit\n' >&3

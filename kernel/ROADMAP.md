@@ -837,7 +837,16 @@ Deferred filesystem hardening:
     - [x] Luluskan QEMU regression untuk display API, framebuffer, dan compositor.
   - [ ] UEFI GOP/VBE backend untuk framebuffer dinamik 24/32-bit.
   - [ ] EDID, output discovery, dan pemilihan mode paparan.
+    - [x] Tambah parser EDID base block tervalidasi (header/checksum/identity/preferred timing).
+    - [x] Model dan expose output firmware aktif serta status EDID melalui `/dev/display0`.
+    - [ ] Bekalkan bytes EDID melalui DDC/backend GPU, enumerate multi-output, hotplug, dan modeset.
   - [ ] VirtIO-GPU PCI, control queue, resource, dan scanout backend.
+    - [x] Discovery modern PCI transport, BAR, dan vendor capabilities serta expose
+      `/dev/virtio-gpu` dengan regression QEMU `virtio-vga`.
+    - [x] Feature negotiation dan control virtqueue foundation.
+      - [x] Negotiate `VIRTIO_F_VERSION_1`, lengkapkan status handshake, dan enable
+        queue 0 menggunakan descriptor/available/used DMA frames.
+    - [ ] Display-info command, 2D resource, backing storage, transfer/flush, dan scanout.
   - [ ] Shared graphics buffers untuk proses user, fence, dan isolation.
   - [ ] Migrasi display server/compositor ke user mode.
   - [ ] Window protocol, input focus, font rendering, dan GUI toolkit.
@@ -1091,4 +1100,5 @@ Sprint seterusnya fokus menghasilkan paparan moden yang menjadi asas desktop:
     UEFI sahkan geometry `1280x800x32`, stride, backend, checksum, buffer, serta flip.
   - [ ] Ujian shell interaktif UEFI selepas migrasi interrupt input daripada PIC kepada
     APIC/IOAPIC; Q35 belum menghantar keyboard IRQ dengan laluan PIC legacy semasa.
-- [ ] Dokumentasikan display ownership, shared-buffer threat model, dan laluan ke user compositor.
+- [x] Dokumentasikan display ownership, shared-buffer threat model, dan laluan ke user compositor
+  dalam `docs/display-architecture.md`.
