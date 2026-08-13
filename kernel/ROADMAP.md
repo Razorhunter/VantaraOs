@@ -842,32 +842,253 @@ Deferred filesystem hardening:
   - [ ] Migrasi display server/compositor ke user mode.
   - [ ] Window protocol, input focus, font rendering, dan GUI toolkit.
 
-### Phase E: Security, Users, And Compatibility
+### Phase E: Virtual Memory, SMP, And Scheduler Maturity
 
-- [ ] User/group permission model.
-- [ ] File permissions.
-- [ ] Capability atau privilege boundary untuk sensitive syscall.
-- [ ] Secure login/session model.
-- [ ] Compatibility layer target:
-  - [ ] POSIX-like subset
-  - [ ] Vantara-native ABI
-  - [ ] Rust userland SDK
+Matlamat phase ini ialah menjadikan kernel stabil di bawah beban sebenar dan bukan hanya
+workload QEMU satu CPU.
 
-### Phase F: Product-Level OS Experience
+- [x] Naikkan baseline kernel-thread stack daripada 8 KiB kepada 32 KiB selepas
+  integration test menemui stack overflow yang merosakkan allocator semasa `init -> login`.
+- [ ] Pindahkan kernel-thread stack kepada page-backed allocation dengan guard page,
+  high-water diagnostics, dan kegagalan stack overflow yang deterministic.
+- [ ] Gantikan fixed-size kernel heap dengan demand-grown page-backed heap yang boleh
+  berkembang merentasi sempadan page table dengan selamat.
+- [ ] Demand paging dan lazy allocation untuk executable, heap, dan stack user.
+- [ ] `mmap`/`munmap`/`mprotect` serta memory-mapped file dengan W^X enforcement.
+- [ ] Copy-on-write untuk `fork`, shared pages, dan page reference counting.
+- [ ] Page cache bersepadu dengan VFS serta reclaim apabila memory pressure.
+- [ ] Swap abstraction dan anonymous-page eviction sebagai feature opt-in.
+- [ ] Out-of-memory policy yang boleh memilih dan menamatkan proses dengan selamat.
+- [ ] ACPI discovery untuk MADT, HPET, MCFG, FADT, reboot, dan shutdown.
+- [ ] APIC/x2APIC, IOAPIC, MSI, dan MSI-X; hentikan kebergantungan production pada PIC.
+- [ ] SMP bootstrap untuk application processors dan per-CPU kernel state.
+- [ ] SMP-safe scheduler dengan per-CPU run queue, affinity, migration, dan load balancing.
+- [ ] Priority/niceness, starvation prevention, dan kelas real-time asas.
+- [ ] Futex serta primitive blocking synchronization untuk pthread-compatible userland.
+- [ ] High-resolution monotonic/realtime clocks, timer queue, dan tickless idle.
+- [ ] CPU feature detection, XSAVE/FPU/SIMD context switching, dan topology reporting.
+- [ ] Suspend, resume, CPU idle states, dan asas thermal/power management.
 
-- [ ] Installer/dev image builder.
-- [ ] Shell utilities suite.
-- [ ] Service logs dan diagnostics command.
-- [ ] Documentation untuk app developer.
-- [ ] Release cadence:
-  - [ ] nightly/dev image
-  - [ ] milestone image
-  - [ ] changelog
+Exit criteria:
+
+- [ ] Boot stabil dengan sekurang-kurangnya 4 vCPU dan jalankan stress scheduler/memory.
+- [ ] Lulus ujian fork/COW, mmap, futex, OOM, dan concurrent filesystem/network I/O.
+- [ ] Tiada global lock tunggal yang serialize semua process atau semua I/O hot path.
+
+### Phase F: VFS And Storage Production Semantics
+
+- [ ] Lengkapkan inode timestamp, UID/GID, mode bits, link count, dan access checks.
+- [ ] Implement hard link, symbolic link, truncate, sparse file, dan atomic rename.
+- [ ] Advisory file locking, directory iteration stabil, dan per-open file offsets.
+- [ ] Mount/unmount lifecycle, bind mount, read-only mount, dan mount namespaces asas.
+- [ ] Page cache, writeback, dirty-page throttling, `fsync`, dan block I/O scheduler.
+- [ ] Crash-consistent VANTFS menggunakan journal atau copy-on-write metadata.
+- [ ] Filesystem checker, repair utility, versioned on-disk format, dan backup metadata.
+- [ ] GPT parser serta partition UUID/label discovery.
+- [ ] FAT32 read/write untuk EFI/removable media interoperability.
+- [ ] ISO9660 read-only untuk installer/live media.
+- [ ] TRIM/discard dan SMART/health diagnostics untuk storage yang menyokongnya.
+- [ ] Device hotplug-safe mount dan clean removal untuk USB/NVMe storage.
+
+Exit criteria:
+
+- [ ] Power-loss regression tidak merosakkan filesystem di luar transaksi aktif.
+- [ ] Storage stress test merentas AHCI, NVMe, dan USB tanpa data mismatch.
+- [ ] Permission dan ownership tests konsisten pada semua backend VFS.
+
+### Phase G: POSIX-Like ABI And Native Userland Platform
+
+- [ ] Tetapkan Vantara ABI yang versioned dan policy compatibility untuk syscall lama.
+- [ ] Lengkapkan syscall process: `fork`, `execve`, `wait*`, process group, dan session.
+- [ ] Lengkapkan descriptor API: `dup*`, `fcntl`, `ioctl`, `poll`, `select`, dan `epoll`-like.
+- [ ] Lengkapkan filesystem API: `openat`, `statat`, cwd, symlink, mount, dan permissions.
+- [ ] Lengkapkan time API, pipes, Unix-domain sockets, shared memory, dan futex.
+- [ ] TTY/PTY subsystem dengan canonical/raw mode, terminal size, dan job control lengkap.
+- [ ] Dynamic linker/loader, shared libraries, TLS, relocations, dan ASLR-compatible PIE.
+- [ ] C ABI/toolchain target dan libc port atau libc compatibility layer.
+- [ ] Rust target specification, standard-library port, dan versioned Vantara SDK.
+- [ ] Native package format, dependency metadata, signed repository, dan package manager.
+- [ ] Port shell dan core utilities yang cukup untuk build serta debug dari dalam Vantara.
+- [ ] Sediakan stable headers, syscall documentation, examples, dan application test suite.
+
+Exit criteria:
+
+- [ ] Boleh compile dan menjalankan program C serta Rust bukan trivial di Vantara.
+- [ ] Shell, pipes, redirection, PTY, background jobs, dan package install berfungsi.
+- [ ] ABI regression menjamin binary lama terus berjalan dalam compatibility window.
+
+### Phase H: Security, Identity, And Isolation
+
+- [ ] User/group database, UID/GID supplementary groups, dan secure password hashing.
+- [ ] Enforce permission, ownership, umask, sticky/setuid/setgid semantics secara end-to-end.
+- [ ] Capability model untuk menggantikan kebergantungan mutlak kepada UID 0.
+- [ ] Privilege separation untuk driver service, network service, login, dan compositor.
+- [ ] Secure login/session lifecycle, credential switching, dan session auditing.
+- [ ] Per-process resource limits serta quotas untuk memory, CPU, file, dan process count.
+- [ ] Namespaces/sandbox asas untuk process, mount, IPC, network, dan device access.
+- [ ] IPC access control dan explicit handle passing.
+- [ ] ASLR kernel/user, stack canary, guard pages, NX, SMEP, SMAP, dan hardened allocator.
+- [ ] Entropy collection dan cryptographically secure random generator melalui `/dev/random`.
+- [ ] Verified/signed packages dan optional verified boot chain.
+- [ ] Security event log, crash dump, vulnerability response, dan patch policy.
+- [ ] Fuzz syscall, ELF, filesystem, USB, network parser, dan device emulation interfaces.
+
+Exit criteria:
+
+- [ ] Unprivileged process tidak boleh membaca memory, file, device, atau handle proses lain.
+- [ ] Compromise satu service tidak memberi kawalan kernel atau keseluruhan desktop session.
+- [ ] Security regression dan fuzz corpus menjadi release gate.
+
+### Phase I: Complete Network Platform
+
+- [ ] NIC framework dengan asynchronous RX/TX, interrupt moderation, scatter-gather, dan DMA safety.
+- [ ] Driver VirtIO-net serta sekurang-kurangnya satu NIC hardware moden tambahan.
+- [ ] DHCP client, DNS resolver, routing table, loopback, ICMP, dan raw diagnostics.
+- [ ] IPv4 fragmentation/reassembly, Path MTU discovery, dan TCP congestion control matang.
+- [ ] IPv6, neighbor discovery, SLAAC/DHCPv6, ICMPv6, dan dual-stack sockets.
+- [ ] Socket options, non-blocking I/O, polling, multicast, Unix sockets, dan local IPC integration.
+- [ ] Firewall/stateful packet filter, NAT, forwarding, dan per-interface policy.
+- [ ] TLS library integration, certificate store, secure time bootstrap, dan HTTPS client.
+- [ ] Wi-Fi stack: PCI/USB driver, 802.11 management, WPA2/WPA3 supplicant.
+- [ ] Network manager user service dengan wired/wireless configuration dan diagnostics.
+- [ ] Packet capture interface, counters, tracing, dan reproducible network stress tests.
+
+Exit criteria:
+
+- [ ] Vantara memperoleh alamat rangkaian dan mengakses HTTPS tanpa konfigurasi manual.
+- [ ] TCP/UDP/IPv6 bertahan di bawah packet loss, reorder, reconnect, dan multi-process load.
+
+### Phase J: Hardware Driver Coverage
+
+- [ ] Driver model standard: probe/remove, dependency, power state, hotplug, dan stable device API.
+- [ ] IOMMU abstraction dan DMA mapping API untuk isolation serta peranti melebihi DMA32.
+- [ ] PCIe capability parsing, bridges, BAR allocation, MSI/MSI-X, dan hotplug.
+- [ ] ACPI PCI routing, battery, lid, thermal zone, fan, dan power-button events.
+- [ ] Input subsystem generik untuk keyboard, mouse, touchpad, touchscreen, dan game controller.
+- [ ] Audio core serta Intel HDA/AC97 atau VirtIO-sound backend; mixer service userland.
+- [ ] Bluetooth controller baseline dan HID/audio profile yang dipilih.
+- [ ] RTC, hardware RNG, watchdog, GPIO/I2C/SPI abstraction mengikut target hardware.
+- [ ] Printer/scanner/removable-device support melalui user-mode service apabila sesuai.
+- [ ] Hardware compatibility database, driver binding rules, firmware loader, dan diagnostics.
+- [ ] Ujian bare-metal pada sekurang-kurangnya satu desktop dan satu laptop rujukan.
+
+Exit criteria:
+
+- [ ] Boot, input, storage, network, display, audio, dan shutdown berfungsi pada mesin rujukan.
+- [ ] Hotplug/unplug tidak panic kernel atau meninggalkan DMA/handle yang masih aktif.
+
+### Phase K: Graphics, Desktop, And Human Interaction
+
+- [ ] UEFI GOP/native linear framebuffer 24/32-bit dan mode setting berdasarkan EDID.
+- [ ] VirtIO-GPU 2D sebagai backend virtualisasi utama.
+- [ ] Kernel graphics memory manager, shared buffers, fences, page flip, dan process isolation.
+- [ ] Pindahkan compositor/display server ke proses user yang unprivileged.
+- [ ] Definisikan window/surface protocol dengan focus, resize, clipboard, drag-and-drop, dan IME.
+- [ ] Input seat/session routing termasuk shortcut yang tidak boleh dipintas aplikasi biasa.
+- [ ] Font rasterization, Unicode shaping, bidirectional text, DPI scaling, dan accessibility API.
+- [ ] 2D rendering library, theme/widget toolkit, dan application lifecycle API.
+- [ ] Desktop shell: panel, launcher, notification, settings, lock screen, dan file manager.
+- [ ] Terminal emulator, text editor, image viewer, system monitor, dan network settings.
+- [ ] GPU acceleration roadmap: VirtIO-GPU virgl/venus dahulu, kemudian satu keluarga GPU fizikal.
+- [ ] Multi-monitor, hotplug display, vsync, damage tracking, dan software fallback.
+- [ ] Audio/visual/input latency metrics serta desktop integration tests.
+
+Exit criteria:
+
+- [ ] Boot terus ke graphical login dan desktop tanpa menggunakan kernel shell.
+- [ ] Beberapa aplikasi boleh berjalan serentak dengan input, clipboard, audio, dan network.
+- [ ] Crash compositor atau aplikasi boleh dipulihkan tanpa reboot kernel.
+
+### Phase L: Boot, Installer, Updates, And Recovery
+
+- [ ] UEFI-native boot path dengan memory map, GOP, ACPI, initrd, dan kernel command line.
+- [ ] GPT/EFI System Partition layout serta BIOS compatibility hanya jika diperlukan.
+- [ ] Live/install image builder dengan partitioning, formatting, user creation, dan boot setup.
+- [ ] Hardware discovery sebelum install dan laporan peranti/driver yang belum disokong.
+- [ ] Atomic A/B atau snapshot-based system update dengan rollback.
+- [ ] Signed update metadata, channel stable/beta/nightly, dan dependency resolution.
+- [ ] Recovery environment, safe mode, filesystem repair, boot log, dan previous-kernel fallback.
+- [ ] Persistent configuration migration dan rollback-safe package scripts.
+- [ ] Reproducible ISO/disk images, SBOM, checksums, signatures, dan provenance metadata.
+
+Exit criteria:
+
+- [ ] Pengguna boleh install, boot, update, rollback, dan recover tanpa development tools.
+- [ ] Interrupted installation/update tidak menghasilkan sistem yang tidak boleh boot.
+
+### Phase M: Observability, Reliability, And Performance
+
+- [ ] Structured kernel log dengan ring buffer, levels, timestamps, subsystem, dan rate limiting.
+- [ ] Userspace logging daemon, rotation, persistent journal, dan diagnostics bundle.
+- [ ] Kernel crash dump, symbolized stack traces, lock diagnostics, dan watchdog recovery.
+- [ ] Tracing/profiling API untuk syscall, scheduler, allocation, I/O, network, dan IRQ latency.
+- [ ] Sanitizer/debug builds, lock-order validator, race detector strategy, dan fault injection.
+- [ ] Stress/soak tests untuk SMP, memory pressure, filesystem, network, USB hotplug, dan desktop.
+- [ ] Performance benchmarks dan regression budgets untuk boot, context switch, I/O, dan rendering.
+- [ ] CI matrix untuk QEMU BIOS/UEFI, multi-core, AHCI, NVMe, VirtIO, USB, dan failure scenarios.
+- [ ] Bare-metal continuous test rack untuk hardware rujukan.
+- [ ] Stable release criteria, long-term support policy, changelog, dan incident process.
+
+Exit criteria:
+
+- [ ] 24-hour mixed-workload soak test tanpa panic, leak kritikal, atau filesystem corruption.
+- [ ] Setiap kernel panic menghasilkan diagnostic artifact yang boleh dianalisis.
+- [ ] Release tidak dibuat jika correctness, security, compatibility, atau performance gate gagal.
+
+### Phase N: Ecosystem And Self-Hosting
+
+- [ ] Source control client, build tools, compiler/linker, debugger, dan package tooling native.
+- [ ] Port library asas: compression, crypto, TLS, Unicode, image, audio, dan database ringan.
+- [ ] Application permission/manifest model dan stable desktop integration APIs.
+- [ ] Developer documentation, API reference, samples, templates, dan emulator workflow.
+- [ ] Package repository automation, review, signing, reproducibility, dan vulnerability scanning.
+- [ ] Build sebahagian userland Vantara dari dalam Vantara sendiri.
+- [ ] Capai staged self-hosting untuk SDK dan akhirnya keseluruhan base system.
+
+Exit criteria:
+
+- [ ] Developer boleh membina, menguji, debug, package, dan memasang aplikasi dalam Vantara.
+- [ ] Base system boleh dibina semula secara reproducible menggunakan toolchain Vantara.
+
+## Definition Of "Linux-Like Usable"
+
+Vantara tidak perlu menyalin Linux atau menyokong semua hardwarenya. Sasaran minimum
+general-purpose OS dianggap tercapai apabila:
+
+- [ ] Boot dan install pada UEFI VM serta sekurang-kurangnya dua mesin x86_64 rujukan.
+- [ ] SMP, process isolation, permissions, networking, storage, audio, input, dan graphics stabil.
+- [ ] Graphical login, desktop, terminal, file manager, settings, dan aplikasi asas tersedia.
+- [ ] Sambungan Ethernet atau Wi-Fi, DNS, DHCP, TLS, dan web/API client boleh digunakan.
+- [ ] Sistem boleh update serta rollback dan mempunyai recovery path tanpa rebuild manual.
+- [ ] SDK C/Rust, libc/POSIX subset, package manager, dan dokumentasi aplikasi stabil.
+- [ ] Security, fuzzing, stress, performance, dan compatibility suites menjadi release gate.
+
+## Recommended Execution Order
+
+Urutan mengurangkan kerja ulang dan membawa UI ke skrin tanpa mengorbankan foundation:
+
+1. [ ] Siapkan UEFI GOP 32-bit, EDID, dan VirtIO-GPU dalam Advanced Graphics.
+2. [ ] Implement shared graphics buffers/fences dan pindahkan compositor ke user mode.
+3. [ ] Jalankan Phase E secara selari mengikut dependency: ACPI/APIC/SMP, VM, kemudian futex.
+4. [ ] Lengkapkan permission-aware VFS dan crash consistency dalam Phase F.
+5. [ ] Stabilkan POSIX-like ABI, libc, dynamic linker, TTY/PTY, dan SDK dalam Phase G.
+6. [ ] Bina security boundary Phase H sebelum membuka package/app ecosystem.
+7. [ ] Lengkapkan network dan driver mesin rujukan dalam Phase I/J.
+8. [ ] Siapkan desktop Phase K, kemudian installer/update/recovery Phase L.
+9. [ ] Jadikan reliability gates Phase M wajib sebelum stable release.
+10. [ ] Kejar ecosystem dan self-hosting Phase N selepas ABI stabil.
 
 ## Suggested Next Sprint
 
-Sprint paling berbaloi selepas state sekarang:
+Sprint seterusnya fokus menghasilkan paparan moden yang menjadi asas desktop:
 
-- [ ] Mulakan Milestone 18 dengan centralized user pointer validation.
-- [ ] Tambah `/bin/fault` scenario untuk invalid syscall pointer.
-- [ ] Tambah tests pointer validation sebelum scheduler preemption.
+- [x] Tambah bootloader framebuffer handoff dan backend UEFI GOP 32-bit.
+- [x] Generalize compositor supaya tidak bergantung pada konstanta VGA `320x200`.
+- [x] Implement mode/stride/pixel-format validation dan bounded 24/32-bit pixel operations.
+- [x] Tambah QEMU OVMF regression untuk render, checksum, clipping, dan page flip.
+- [x] Expose geometry/backend sebenar melalui `/dev/fb0` dan `/dev/display0`.
+  - [x] PID 1 baca kedua-dua node melalui syscall `open/read/close` dan regression
+    UEFI sahkan geometry `1280x800x32`, stride, backend, checksum, buffer, serta flip.
+  - [ ] Ujian shell interaktif UEFI selepas migrasi interrupt input daripada PIC kepada
+    APIC/IOAPIC; Q35 belum menghantar keyboard IRQ dengan laluan PIC legacy semasa.
+- [ ] Dokumentasikan display ownership, shared-buffer threat model, dan laluan ke user compositor.

@@ -1,6 +1,7 @@
 KERNEL_DIR := kernel
 KERNEL_TARGET_DIR := target/kernel
 KERNEL_TARGET_SPEC := target/generated/x86_64-vantara_os.json
+CARGO_LEGACY_BOOT := $(abspath scripts/cargo-legacy-boot.sh)
 USERLAND_DIR := userland/native
 USERLAND_BIN_DIR := target/userland
 TARGET := x86_64-vantara_os
@@ -52,7 +53,7 @@ COMMAND_SMOKE_TARGETS := $(addprefix command-smoke-,$(COMMAND_SMOKE_CASES))
 	persist-disk reset-persist \
 	smoke boot-test command-smoke $(COMMAND_SMOKE_TARGETS) \
 	service-manager-test device-namespace-test network-rx-test \
-	usb-storage-test usb-write-test usb-lifecycle-test usb-hid-test ehci-test xhci-test xhci-hid-test framebuffer-test \
+	usb-storage-test usb-write-test usb-lifecycle-test usb-hid-test ehci-test xhci-test xhci-hid-test framebuffer-test uefi-framebuffer-test modern-boot docker-modern-boot \
 	filesystem-write-test filesystem-persistence-test block-cache-test partition-test \
 	ahci-test ahci-write-test ahci-vantfs-test ahci-persist-test storage-policy-test nvme-test nvme-write-test preemption-test \
 	kernel-thread-preemption-test signal-test terminal-signal-test isolation-test \
@@ -88,6 +89,9 @@ help:
 	@echo "  make xhci-test"
 	@echo "  make xhci-hid-test"
 	@echo "  make framebuffer-test"
+	@echo "  make modern-boot          Build BIOS and UEFI images with framebuffer handoff"
+	@echo "  make docker-modern-boot   Build modern images using the pinned toolchain"
+	@echo "  make uefi-framebuffer-test"
 	@echo "  make command-smoke"
 	@echo "  make filesystem-write-test"
 	@echo "  make filesystem-persistence-test"
@@ -172,7 +176,7 @@ kernel-target-spec:
 	bash scripts/patch-bootloader-target.sh "$(KERNEL_TARGET_SPEC)"
 
 kernel-build: userland-bin kernel-target-spec
-	cd $(KERNEL_DIR) && PATH="$(CARGO_PATH)" CARGO_TARGET_DIR=../$(KERNEL_TARGET_DIR) cargo bootimage --target ../$(KERNEL_TARGET_SPEC)
+	cd $(KERNEL_DIR) && PATH="$(CARGO_PATH)" CARGO="$(CARGO_LEGACY_BOOT)" CARGO_TARGET_DIR=../$(KERNEL_TARGET_DIR) cargo bootimage --target ../$(KERNEL_TARGET_SPEC)
 	bash scripts/generate-artifact-manifest.sh
 
 artifact-manifest: kernel-build
@@ -195,6 +199,8 @@ $(USERLAND_BIN_DIR)/%.bin: $(USERLAND_DIR)/asm/%.asm $(USERLAND_DIR)/asm/abi.inc
 $(USERLAND_BIN_DIR)/%.elf: $(USERLAND_DIR)/elf/%.rs $(USERLAND_DIR)/elf/linker.ld $(USERLAND_DIR)/src/abi.rs | $(USERLAND_BIN_DIR)
 	rustc --edition=2024 --target x86_64-unknown-none \
 		-C panic=abort \
+		-C debuginfo=0 \
+		-C strip=debuginfo \
 		-C no-redzone=yes \
 		-C relocation-model=static \
 		-C link-arg=-T$(USERLAND_DIR)/elf/linker.ld \
@@ -272,6 +278,15 @@ xhci-hid-test: kernel-build
 
 framebuffer-test:
 	QEMU="$(QEMU)" bash scripts/qemu-framebuffer.sh
+
+modern-boot: userland-bin
+	bash scripts/build-modern-boot.sh
+
+docker-modern-boot:
+	docker compose run --rm vantara-kernel-builder make modern-boot
+
+uefi-framebuffer-test: userland-bin
+	QEMU="$(QEMU)" bash scripts/qemu-uefi-framebuffer.sh
 
 command-smoke: kernel-build
 	QEMU="$(QEMU)" bash scripts/qemu-command-smoke.sh

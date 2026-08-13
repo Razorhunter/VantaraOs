@@ -396,56 +396,81 @@ macro_rules! println
 
 #[doc(hidden)]
 pub fn _print(args: fmt::Arguments) {
-    use core::fmt::Write;
+    #[cfg(feature = "modern-boot")]
+    {
+        crate::serial::_print(args);
+        return;
+    }
 
-    crate::sync::without_interrupts(|| {
-        WRITER.lock().write_fmt(args).unwrap();
-    });
+    #[cfg(not(feature = "modern-boot"))]
+    {
+        use core::fmt::Write;
+
+        crate::sync::without_interrupts(|| {
+            WRITER.lock().write_fmt(args).unwrap();
+        });
+    }
 }
 
 pub fn draw_mouse_cursor(col: usize, row: usize) {
+    #[cfg(feature = "modern-boot")]
+    let _ = (col, row);
+    #[cfg(not(feature = "modern-boot"))]
     crate::sync::without_interrupts(|| {
         WRITER.lock().draw_mouse_cursor(col, row);
     });
 }
 
 pub fn clear_mouse_cursor() {
+    #[cfg(not(feature = "modern-boot"))]
     crate::sync::without_interrupts(|| {
         WRITER.lock().clear_mouse_cursor();
     });
 }
 
 pub fn update_mouse_cursor(col: usize, row: usize) {
+    #[cfg(feature = "modern-boot")]
+    let _ = (col, row);
+    #[cfg(not(feature = "modern-boot"))]
     crate::sync::without_interrupts(|| {
         WRITER.lock().draw_mouse_cursor(col, row);
     });
 }
 
 pub fn set_color(foreground: Color, background: Color) {
+    #[cfg(feature = "modern-boot")]
+    let _ = (foreground, background);
+    #[cfg(not(feature = "modern-boot"))]
     crate::sync::without_interrupts(|| {
         WRITER.lock().set_color(foreground, background);
     });
 }
 
 pub fn clear_screen() {
+    #[cfg(not(feature = "modern-boot"))]
     crate::sync::without_interrupts(|| {
         WRITER.lock().clear_screen();
     });
 }
 
 pub fn backspace() {
+    #[cfg(not(feature = "modern-boot"))]
     crate::sync::without_interrupts(|| {
         WRITER.lock().backspace();
     });
 }
 
 pub fn erase_previous() {
+    #[cfg(not(feature = "modern-boot"))]
     crate::sync::without_interrupts(|| {
         WRITER.lock().erase_previous();
     });
 }
 
 pub fn write_at(row: usize, col: usize, byte: u8, foreground: Color, background: Color) {
+    #[cfg(feature = "modern-boot")]
+    let _ = (row, col, byte, foreground, background);
+    #[cfg(not(feature = "modern-boot"))]
     crate::sync::without_interrupts(|| {
         WRITER
             .lock()
@@ -454,12 +479,18 @@ pub fn write_at(row: usize, col: usize, byte: u8, foreground: Color, background:
 }
 
 pub fn write_status_line(row: usize, args: fmt::Arguments) {
+    #[cfg(feature = "modern-boot")]
+    let _ = (row, args);
+    #[cfg(not(feature = "modern-boot"))]
     crate::sync::without_interrupts(|| {
         WRITER.lock().write_status_line(row, args).unwrap();
     });
 }
 
 pub fn update_text_cursor_blink(ticks: u64) {
+    #[cfg(feature = "modern-boot")]
+    let _ = ticks;
+    #[cfg(not(feature = "modern-boot"))]
     crate::sync::without_interrupts(|| {
         WRITER.lock().update_text_cursor_blink(ticks);
     });

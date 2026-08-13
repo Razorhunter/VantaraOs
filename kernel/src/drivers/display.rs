@@ -4,6 +4,7 @@ use alloc::vec::Vec;
 use crate::sync::PreemptMutex as Mutex;
 
 use super::framebuffer;
+pub use super::framebuffer::PixelFormat;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DisplayBackend {
@@ -11,15 +12,6 @@ pub enum DisplayBackend {
     LegacyVga,
     UefiGop,
     VirtioGpu,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum PixelFormat {
-    Indexed8,
-    Rgb888,
-    Bgr888,
-    Xrgb8888,
-    Bgrx8888,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -78,11 +70,16 @@ pub fn init() {
         stride: framebuffer.stride,
         bits_per_pixel: framebuffer.bits_per_pixel,
         refresh_millihertz: 70_000,
-        pixel_format: PixelFormat::Indexed8,
+        pixel_format: framebuffer.pixel_format,
+    };
+    let backend = if cfg!(feature = "modern-boot") {
+        DisplayBackend::UefiGop
+    } else {
+        DisplayBackend::LegacyVga
     };
     *DISPLAY.lock() = DisplayInfo {
         ready: true,
-        backend: DisplayBackend::LegacyVga,
+        backend,
         mode,
         allocated_buffers: 0,
         page_flips: 0,
@@ -92,10 +89,15 @@ pub fn init() {
     crate::drivers::status::report(
         "display",
         crate::drivers::status::DriverState::Ready,
-        "generic display API with legacy VGA backend",
+        if backend == DisplayBackend::UefiGop {
+            "generic display API with UEFI GOP backend"
+        } else {
+            "generic display API with legacy VGA backend"
+        },
     );
     crate::serial_println!(
-        "[DISPLAY] backend=LegacyVga mode={}x{} stride={} bpp={} refresh-millihertz={}",
+        "[DISPLAY] backend={:?} mode={}x{} stride={} bpp={} refresh-millihertz={}",
+        backend,
         mode.width,
         mode.height,
         mode.stride,

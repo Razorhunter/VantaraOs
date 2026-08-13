@@ -10,6 +10,7 @@ through validated APIs rather than dereferencing arbitrary addresses directly.
 | --- | --- | --- |
 | Boot memory and paging | `memory.rs`, `user/address_space.rs`, `allocator.rs` | Bootloader physical-memory offset is valid; page-table frames are live and uniquely mutated; mappings use allocated frames and canonical addresses. |
 | Ring-3 transitions | `user/ring3.rs`, `runtime.rs`, `scheduler/*` | CR3 belongs to the selected process, kernel mappings remain present, GDT selectors are installed, saved RIP/RSP/register state belongs to that task, and ELF pages obey W^X. |
+| Boot handoff | `main.rs`, `memory.rs`, `drivers/framebuffer.rs` | BootInfo memory regions remain static, only `Usable` frames enter the allocator, the physical-memory offset is present, and framebuffer address/stride/size stay mapped for kernel ownership. |
 | User pointers | `user/syscall.rs` | Every complete range belongs to the current process and each page is present, user-accessible, and writable when the kernel writes. |
 | ELF loading | `user/elf.rs`, `user/loader.rs` | ELF headers and segment bounds are validated before copying; destinations stay inside prepared user mappings. |
 | Allocators | `allocator/*` | Heap range is mapped once, aligned, exclusively allocator-owned, and free-list nodes describe valid non-overlapping regions. |

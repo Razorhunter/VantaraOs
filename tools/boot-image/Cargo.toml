@@ -1,0 +1,8 @@
+[package]
+name = "vantara-boot-image"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[dependencies]
+bootloader = { version = "=0.11.15", default-features = false, features = ["uefi"] }

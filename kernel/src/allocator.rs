@@ -23,7 +23,10 @@ pub struct Dummy;
 static ALLOCATOR: Locked<FixedSizeBlockAllocator> = Locked::new(FixedSizeBlockAllocator::new());
 
 pub const HEAP_START: usize = 0x_4444_4444_0000;
-pub const HEAP_SIZE: usize = 1024 * 1024; // 1 MiB
+// The heap owns long-lived process/driver state and the compositor's scanout
+// buffer. A 1280x800x32 GOP mode alone needs 4,096,000 bytes, so retain enough
+// fixed headroom until heap growth becomes demand-driven.
+pub const HEAP_SIZE: usize = 8 * 1024 * 1024; // 8 MiB
 
 static LIVE_ALLOCATED_BYTES: AtomicUsize = AtomicUsize::new(0);
 static ALLOCATION_FAILURES: AtomicUsize = AtomicUsize::new(0);

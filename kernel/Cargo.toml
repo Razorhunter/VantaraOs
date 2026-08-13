@@ -14,6 +14,7 @@ ahci-write-test = []
 nvme-write-test = []
 usb-write-test = []
 framebuffer-vga = ["bootloader/vga_320x200"]
+modern-boot = ["dep:bootloader_api"]
 kernel-thread-preemption-test = []
 storage-ahci = []
 storage-auto = []
@@ -22,6 +23,7 @@ storage-nvme = []
 
 [dependencies]
 bootloader = { version = "0.9.23", features = ["map_physical_memory"] }
+bootloader_api = { version = "=0.11.15", optional = true }
 volatile = "0.2.6"
 spin = "0.5.2"
 x86_64 = { version = "0.15.0", default-features = false, features = ["instructions", "abi_x86_interrupt"] }

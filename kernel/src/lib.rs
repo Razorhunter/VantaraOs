@@ -1,5 +1,6 @@
 #![no_std]
 #![feature(abi_x86_interrupt)]
+#![feature(let_chains)]
 #![deny(unsafe_op_in_unsafe_fn)]
 #![cfg_attr(test, no_main)]
 #![feature(custom_test_frameworks)]

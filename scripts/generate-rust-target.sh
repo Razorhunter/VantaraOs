@@ -14,7 +14,7 @@ fi
 mkdir -p "$(dirname "${OUTPUT_TARGET}")"
 
 cleanup() {
-  rm -f "${TMP_TARGET}"
+  rm -f "${TMP_TARGET}" "${TMP_TARGET}.legacy"
 }
 trap cleanup EXIT
 
@@ -29,6 +29,25 @@ for abi in x86-softfloat softfloat; do
     --crate-type bin >/dev/null 2>&1; then
     mv "${TMP_TARGET}" "${OUTPUT_TARGET}"
     echo "generated Rust target: ${OUTPUT_TARGET} (rustc-abi=${abi})"
+    exit 0
+  fi
+
+  # Rust target JSON used strings for integer-width fields before newer
+  # nightlies changed them to JSON numbers. Keep the canonical source modern,
+  # but generate the legacy spelling for the pinned bootloader toolchain.
+  sed -E \
+    -e 's/("target-pointer-width"[[:space:]]*:[[:space:]]*)([0-9]+)/\1"\2"/' \
+    -e 's/("target-c-int-width"[[:space:]]*:[[:space:]]*)([0-9]+)/\1"\2"/' \
+    "${TMP_TARGET}" >"${TMP_TARGET}.legacy"
+  mv "${TMP_TARGET}.legacy" "${TMP_TARGET}"
+  if printf '' | "${RUSTC_BIN}" - \
+    --crate-name ___ \
+    -Zunstable-options \
+    --print=file-names \
+    --target "${TMP_TARGET}" \
+    --crate-type bin >/dev/null 2>&1; then
+    mv "${TMP_TARGET}" "${OUTPUT_TARGET}"
+    echo "generated Rust target: ${OUTPUT_TARGET} (rustc-abi=${abi}, legacy-width-fields=true)"
     exit 0
   fi
 done

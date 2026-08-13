@@ -16,8 +16,8 @@ kernel/src/drivers/xhci.rs	17
 kernel/src/gdt.rs	1
 kernel/src/interrupts.rs	9
 kernel/src/lib.rs	3
-kernel/src/main.rs	5
-kernel/src/memory.rs	14
+kernel/src/main.rs	6
+kernel/src/memory.rs	15
 kernel/src/power.rs	2
 kernel/src/runtime.rs	9
 kernel/src/scheduler/context.rs	1

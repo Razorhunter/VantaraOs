@@ -13,7 +13,11 @@ pub use test_task::test_task_entry;
 
 use crate::serial_println;
 
-const DEFAULT_STACK_SIZE: usize = 8 * 1024;
+// Runtime kernel threads execute process loading and filesystem paths with
+// substantially deeper call chains than the idle prototype. Eight KiB can
+// grow into adjacent heap allocations before the allocator gets a chance to
+// report a useful failure.
+const DEFAULT_STACK_SIZE: usize = 32 * 1024;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct SchedulerStats {

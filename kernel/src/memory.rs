@@ -1,5 +1,7 @@
-use bootloader::bootinfo::MemoryMap;
-use bootloader::bootinfo::MemoryRegionType;
+#[cfg(not(feature = "modern-boot"))]
+use bootloader::bootinfo::{MemoryMap, MemoryRegionType};
+#[cfg(feature = "modern-boot")]
+use bootloader_api::info::{MemoryRegionKind, MemoryRegions};
 use x86_64::registers::model_specific::{Efer, EferFlags};
 use x86_64::{
     PhysAddr,
@@ -18,7 +20,10 @@ use x86_64::{
 /// memory as non-usable. This allocator only hands out frames from regions
 /// explicitly tagged as `MemoryRegionType::Usable`.
 pub struct BootInfoFrameAllocator {
+    #[cfg(not(feature = "modern-boot"))]
     memory_map: &'static MemoryMap,
+    #[cfg(feature = "modern-boot")]
+    memory_regions: &'static MemoryRegions,
     next: usize,
 }
 
@@ -31,9 +36,19 @@ pub struct FrameStats {
 
 impl BootInfoFrameAllocator {
     /// Creates a new BootInfoFrameAllocator.
+    #[cfg(not(feature = "modern-boot"))]
     pub unsafe fn init(memory_map: &'static MemoryMap) -> Self {
         BootInfoFrameAllocator {
             memory_map,
+            next: 0,
+        }
+    }
+
+    /// Creates an allocator from the versioned bootloader API memory map.
+    #[cfg(feature = "modern-boot")]
+    pub unsafe fn init(memory_regions: &'static MemoryRegions) -> Self {
+        BootInfoFrameAllocator {
+            memory_regions,
             next: 0,
         }
     }
@@ -41,6 +56,7 @@ impl BootInfoFrameAllocator {
 
 impl BootInfoFrameAllocator {
     /// Returns an iterator over the usable frames specified in the memory map.
+    #[cfg(not(feature = "modern-boot"))]
     fn usable_frames(&self) -> impl Iterator<Item = PhysFrame> {
         // get usable regions from memory map
         let regions = self.memory_map.iter();
@@ -51,6 +67,16 @@ impl BootInfoFrameAllocator {
         let frame_addresses = addr_ranges.flat_map(|r| r.step_by(4096));
         // create `PhysFrame` types from the start addresses
         frame_addresses.map(|addr| PhysFrame::containing_address(PhysAddr::new(addr)))
+    }
+
+    /// Returns usable frames from the bootloader v0.11 memory-region ABI.
+    #[cfg(feature = "modern-boot")]
+    fn usable_frames(&self) -> impl Iterator<Item = PhysFrame> {
+        self.memory_regions
+            .iter()
+            .filter(|region| region.kind == MemoryRegionKind::Usable)
+            .flat_map(|region| (region.start..region.end).step_by(4096))
+            .map(|address| PhysFrame::containing_address(PhysAddr::new(address)))
     }
 
     pub fn usable_frame_count(&self) -> usize {

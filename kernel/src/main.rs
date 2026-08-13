@@ -6,7 +6,10 @@
 #![reexport_test_harness_main = "test_main"]
 
 use alloc::{boxed::Box, rc::Rc, vec, vec::Vec};
+#[cfg(not(feature = "modern-boot"))]
 use bootloader::{BootInfo, entry_point};
+#[cfg(feature = "modern-boot")]
+use bootloader_api::{BootInfo, entry_point};
 use core::panic::PanicInfo;
 use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use kernel::serial_println;
@@ -68,20 +71,102 @@ extern "C" fn task_c() -> ! {
     }
 }
 
-entry_point!(kernel_main);
+#[cfg(not(feature = "modern-boot"))]
+entry_point!(legacy_kernel_main);
 
-fn kernel_main(boot_info: &'static BootInfo) -> ! {
+#[cfg(feature = "modern-boot")]
+use bootloader_api::config::{BootloaderConfig, Mapping};
+
+#[cfg(feature = "modern-boot")]
+static BOOTLOADER_CONFIG: BootloaderConfig = {
+    let mut config = BootloaderConfig::new_default();
+    config.mappings.physical_memory = Some(Mapping::Dynamic);
+    config
+};
+
+#[cfg(feature = "modern-boot")]
+entry_point!(modern_kernel_main, config = &BOOTLOADER_CONFIG);
+
+#[derive(Debug, Clone, Copy)]
+struct BootFramebuffer {
+    address: usize,
+    width: usize,
+    height: usize,
+    stride: usize,
+    bits_per_pixel: u8,
+    pixel_format: kernel::drivers::framebuffer::PixelFormat,
+}
+
+#[cfg(not(feature = "modern-boot"))]
+fn legacy_kernel_main(boot_info: &'static BootInfo) -> ! {
+    let phys_mem_offset = boot_info.physical_memory_offset;
+    let frame_allocator =
+        unsafe { kernel::memory::BootInfoFrameAllocator::init(&boot_info.memory_map) };
+    kernel_main(phys_mem_offset, frame_allocator, None)
+}
+
+#[cfg(feature = "modern-boot")]
+fn modern_kernel_main(boot_info: &'static mut BootInfo) -> ! {
+    use bootloader_api::info::{Optional, PixelFormat as BootPixelFormat};
+
+    let phys_mem_offset = match boot_info.physical_memory_offset {
+        Optional::Some(offset) => offset,
+        Optional::None => panic!("bootloader did not map physical memory"),
+    };
+    let framebuffer = match &mut boot_info.framebuffer {
+        Optional::Some(framebuffer) => {
+            let info = framebuffer.info();
+            let pixel_format = match info.pixel_format {
+                BootPixelFormat::U8 => kernel::drivers::framebuffer::PixelFormat::Indexed8,
+                BootPixelFormat::Rgb => {
+                    if info.bytes_per_pixel == 4 {
+                        kernel::drivers::framebuffer::PixelFormat::Bgrx8888
+                    } else {
+                        kernel::drivers::framebuffer::PixelFormat::Rgb888
+                    }
+                }
+                BootPixelFormat::Bgr => {
+                    if info.bytes_per_pixel == 4 {
+                        kernel::drivers::framebuffer::PixelFormat::Xrgb8888
+                    } else {
+                        kernel::drivers::framebuffer::PixelFormat::Bgr888
+                    }
+                }
+                BootPixelFormat::Unknown { .. } => {
+                    panic!("unsupported boot framebuffer pixel format")
+                }
+                _ => panic!("unknown future boot framebuffer pixel format"),
+            };
+            Some(BootFramebuffer {
+                address: framebuffer.buffer_mut().as_mut_ptr() as usize,
+                width: info.width,
+                height: info.height,
+                stride: info.stride.saturating_mul(info.bytes_per_pixel),
+                bits_per_pixel: (info.bytes_per_pixel.saturating_mul(8)) as u8,
+                pixel_format,
+            })
+        }
+        Optional::None => None,
+    };
+    let frame_allocator =
+        unsafe { kernel::memory::BootInfoFrameAllocator::init(&boot_info.memory_regions) };
+    kernel_main(phys_mem_offset, frame_allocator, framebuffer)
+}
+
+fn kernel_main(
+    physical_memory_offset: u64,
+    mut frame_allocator: kernel::memory::BootInfoFrameAllocator,
+    boot_framebuffer: Option<BootFramebuffer>,
+) -> ! {
     use kernel::allocator;
     use kernel::memory;
-    use kernel::memory::BootInfoFrameAllocator;
     use x86_64::VirtAddr;
 
     kernel::init();
     memory::enable_no_execute();
 
-    let phys_mem_offset = VirtAddr::new(boot_info.physical_memory_offset);
+    let phys_mem_offset = VirtAddr::new(physical_memory_offset);
     let mut mapper = unsafe { memory::init(phys_mem_offset) };
-    let mut frame_allocator = unsafe { BootInfoFrameAllocator::init(&boot_info.memory_map) };
 
     if frame_allocator.has_usable_frames() {
         kernel::diagnostics::mark_frame_allocator();
@@ -96,7 +181,18 @@ fn kernel_main(boot_info: &'static BootInfo) -> ! {
 
     allocator::init_heap(&mut mapper, &mut frame_allocator).expect("heap initialization failed");
     kernel::diagnostics::mark_heap();
-    kernel::drivers::framebuffer::init();
+    if let Some(framebuffer) = boot_framebuffer {
+        kernel::drivers::framebuffer::init_boot_framebuffer(
+            framebuffer.address,
+            framebuffer.width,
+            framebuffer.height,
+            framebuffer.stride,
+            framebuffer.bits_per_pixel,
+            framebuffer.pixel_format,
+        );
+    } else {
+        kernel::drivers::framebuffer::init();
+    }
     kernel::drivers::display::init();
     kernel::drivers::compositor::init();
     kernel::user::init();
