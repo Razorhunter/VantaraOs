@@ -65,9 +65,16 @@ pub const SYS_TCP_CONNECT: u64 = 61;
 pub const SYS_TCP_SEND: u64 = 62;
 pub const SYS_TCP_RECV: u64 = 63;
 pub const SYS_TCP_CLOSE: u64 = 64;
+pub const SYS_SURFACE_CREATE: u64 = 65;
+pub const SYS_SURFACE_CONFIGURE: u64 = 66;
+pub const SYS_SURFACE_SET_COLOR: u64 = 67;
+pub const SYS_SURFACE_FOCUS: u64 = 68;
+pub const SYS_SURFACE_DESTROY: u64 = 69;
+pub const SYS_SURFACE_DAMAGE: u64 = 70;
+pub const SYS_FRAME_FENCE_STATUS: u64 = 71;
 
 pub const ABI_VERSION_MAJOR: u64 = 1;
-pub const ABI_VERSION_MINOR: u64 = 14;
+pub const ABI_VERSION_MINOR: u64 = 16;
 pub const ABI_VERSION: u64 = (ABI_VERSION_MAJOR << 32) | ABI_VERSION_MINOR;
 
 pub const ERR_UNKNOWN_SYSCALL: i64 = -1;
@@ -152,6 +159,10 @@ pub fn write(text: &str) -> u64 {
     write_bytes(STDOUT, text.as_bytes())
 }
 
+pub fn debug(text: &str) -> u64 {
+    write_bytes(STDERR, text.as_bytes())
+}
+
 pub fn write_line(text: &str) -> u64 {
     let written = write(text);
     write("\n");
@@ -160,6 +171,34 @@ pub fn write_line(text: &str) -> u64 {
 
 pub fn write_bytes(fd: u64, bytes: &[u8]) -> u64 {
     unsafe { syscall3(SYS_WRITE, fd, bytes.as_ptr() as u64, bytes.len() as u64) }
+}
+
+pub fn surface_create(x: u64, y: u64, width: u64, height: u64, color: u8) -> i64 {
+    unsafe { syscall5(SYS_SURFACE_CREATE, x, y, width, height, u64::from(color)) as i64 }
+}
+
+pub fn surface_configure(id: u64, x: u64, y: u64, width: u64, height: u64) -> i64 {
+    unsafe { syscall5(SYS_SURFACE_CONFIGURE, id, x, y, width, height) as i64 }
+}
+
+pub fn surface_set_color(id: u64, color: u8) -> i64 {
+    unsafe { syscall2(SYS_SURFACE_SET_COLOR, id, u64::from(color)) as i64 }
+}
+
+pub fn surface_focus(id: u64) -> i64 {
+    unsafe { syscall1(SYS_SURFACE_FOCUS, id) as i64 }
+}
+
+pub fn surface_destroy(id: u64) -> i64 {
+    unsafe { syscall1(SYS_SURFACE_DESTROY, id) as i64 }
+}
+
+pub fn surface_damage(id: u64, x: u64, y: u64, width: u64, height: u64) -> i64 {
+    unsafe { syscall5(SYS_SURFACE_DAMAGE, id, x, y, width, height) as i64 }
+}
+
+pub fn frame_fence_status(fence: u64) -> i64 {
+    unsafe { syscall1(SYS_FRAME_FENCE_STATUS, fence) as i64 }
 }
 
 pub fn uptime_ms() -> u64 {

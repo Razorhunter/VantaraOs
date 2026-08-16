@@ -18,54 +18,54 @@ const DISPLAY_NODES: [(&str, &str); 3] = [
 
 #[unsafe(no_mangle)]
 pub extern "C" fn _start() -> ! {
-    abi::write("Vantara init started\n");
-    abi::write("[init] service manager running as pid 1\n");
+    abi::debug("Vantara init started\n");
+    abi::debug("[init] service manager running as pid 1\n");
     probe_display_nodes();
 
     loop {
-        abi::write("[init] starting login\n");
+        abi::debug("[init] starting login\n");
         let login_pid = abi::exec_bytes(LOGIN_PATH, None);
         if login_pid < 0 {
-            abi::write("[init] failed to start login; retrying\n");
+            abi::debug("[init] failed to start login; retrying\n");
             let _ = abi::sleep_ms(RESTART_DELAY_MS);
             continue;
         }
 
         if abi::waitpid(login_pid as u64) < 0 {
-            abi::write("[init] waitpid failed; retrying login\n");
+            abi::debug("[init] waitpid failed; retrying login\n");
         } else {
-            abi::write("[init] login exited; restarting\n");
+            abi::debug("[init] login exited; restarting\n");
         }
         let _ = abi::sleep_ms(RESTART_DELAY_MS);
     }
 }
 
 fn probe_display_nodes() {
-    let mut buffer = [0u8; 256];
+    let mut buffer = [0u8; 512];
     for (path, prefix) in DISPLAY_NODES {
         let fd = abi::open(path);
         if fd < 0 {
-            abi::write(prefix);
-            abi::write("unavailable\n");
+            abi::debug(prefix);
+            abi::debug("unavailable\n");
             continue;
         }
         let count = abi::read(fd as u64, &mut buffer);
         let _ = abi::close(fd as u64);
-        abi::write(prefix);
+        abi::debug(prefix);
         if count > 0 {
-            abi::write_bytes(abi::STDOUT, &buffer[..count as usize]);
+            abi::write_bytes(abi::STDERR, &buffer[..count as usize]);
             if buffer[count as usize - 1] != b'\n' {
-                abi::write("\n");
+                abi::debug("\n");
             }
         } else {
-            abi::write("read-failed\n");
+            abi::debug("read-failed\n");
         }
     }
 }
 
 #[panic_handler]
 fn panic(_info: &PanicInfo) -> ! {
-    abi::write("[init] panic; halting service manager\n");
+    abi::debug("[init] panic; halting service manager\n");
     loop {
         abi::yield_now();
     }

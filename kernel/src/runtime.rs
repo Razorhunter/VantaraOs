@@ -18,12 +18,6 @@ pub fn run_event_loop() -> ! {
             if DEBUG_INPUT_EVENTS {
                 serial_println!("Input event: {:?}", event);
             }
-            if !crate::user::process::userland_owns_keyboard() {
-                crate::shell::handle_event(&event);
-            }
-
-            let pos = crate::input::get_mouse_position();
-            crate::vga_buffer::update_mouse_cursor(pos.x as usize, pos.y as usize);
             if DEBUG_INPUT_OVERLAY {
                 crate::input::draw_debug_overlay();
             }
@@ -44,17 +38,11 @@ fn run_pending_user_program() {
     if let Err(err) = unsafe {
         crate::user::address_space::ensure_active_user_program_mapping_writable(writable_size)
     } {
-        crate::println!(
-            "run: {}: user mapping prepare failed: {:?}",
-            program.path,
-            err
-        );
         crate::serial_println!(
             "[USER] failed to prepare shared user mapping for {}: {:?}",
             program.path,
             err
         );
-        crate::shell::prompt();
         return;
     }
 
@@ -123,18 +111,12 @@ fn run_pending_user_program() {
                             context.arg.as_bytes(),
                         )
                     } {
-                        crate::println!(
-                            "run: {}: private memory prepare failed: {:?}",
-                            loaded.path,
-                            err
-                        );
                         crate::serial_println!(
                             "[USER] failed to prepare private memory pid={} P4 {:#x}: {:?}",
                             context.pid,
                             frame,
                             err
                         );
-                        crate::shell::prompt();
                         return;
                     }
                     crate::serial_println!(
@@ -165,9 +147,7 @@ fn run_pending_user_program() {
             }
         }
         Err(err) => {
-            crate::println!("run: {}: load failed: {:?}", program.path, err);
             crate::serial_println!("[USER] failed to load {}: {:?}", program.path, err);
-            crate::shell::prompt();
         }
     }
 }

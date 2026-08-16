@@ -32,13 +32,13 @@ ASM_PROGRAMS := demo uptime ls cat whoami touch write rm mv mkdir rmdir
 ELF_PROGRAMS := \
 	init fault login sh stat procs pci netdev dmesg drvstat kill sleep \
 	yielddemo preemptdemo threaddemo pipedemo eventdemo msgdemo \
-	signaldemo jobdemo udpdemo tcpdemo rusthello pwd
+	signaldemo jobdemo udpdemo tcpdemo windowdemo rusthello pwd
 USERLAND_IMAGES := \
 	$(addprefix $(USERLAND_BIN_DIR)/,$(addsuffix .bin,$(ASM_PROGRAMS))) \
 	$(addprefix $(USERLAND_BIN_DIR)/,$(addsuffix .elf,$(ELF_PROGRAMS)))
 
 COMMAND_SMOKE_CASES := \
-	ls cat procs rusthello threaddemo pipedemo eventdemo msgdemo jobdemo udpdemo tcpdemo
+	ls cat procs rusthello threaddemo pipedemo eventdemo msgdemo jobdemo udpdemo tcpdemo windowdemo
 COMMAND_SMOKE_TARGETS := $(addprefix command-smoke-,$(COMMAND_SMOKE_CASES))
 
 .DEFAULT_GOAL := help

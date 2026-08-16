@@ -1,0 +1,9 @@
+windowdemo: protocol start
+windowdemo: ownership protected
+windowdemo: create ok
+windowdemo: configure color focus ok
+windowdemo: damage fence complete
+windowdemo: destroy ok
+windowdemo: exit cleanup armed
+windowdemo: PASS
+[COMPOSITOR] released 1 surface(s)

@@ -68,8 +68,23 @@ buffers and expose counters for rejected submissions.
 
 ## Current limitations
 
+ABI v1.16 provides the first PID-owned surface lifecycle: create,
+configure, palette-color update, focus, and destroy. Cross-process mutation is
+rejected, surface geometry and count are bounded, and `/bin/windowdemo` covers
+the Ring-3 to VirtIO-GPU path. Owned surfaces are reclaimed when their process
+exits. This control-only protocol deliberately does not map client pixels or
+physical scanout memory.
+
+Surface damage returns a monotonically increasing synchronous frame fence.
+The compositor, generic display layer, and VirtIO-GPU backend preserve the
+damage rectangle through redraw, backing-buffer row copy, transfer-to-host, and
+resource flush. A completed fence can be queried through ABI v1.16; asynchronous
+callbacks remain future work.
+
 - UEFI GOP supplies the active mode but not EDID through the current handoff.
-- There is no runtime modeset, hotplug, shared buffer, fence, or user compositor.
+- There is no runtime modeset, hotplug, shared pixel buffer, frame fence, or user compositor.
+- Surface geometry changes redraw the union of old and new bounds; color,
+  focus, explicit damage, creation, and destruction redraw only affected bounds.
 - UEFI Q35 interactive keyboard testing awaits APIC/IOAPIC input routing.
 - The fixed kernel heap is temporary; high-resolution scanout buffers require
   a demand-grown page-backed heap.

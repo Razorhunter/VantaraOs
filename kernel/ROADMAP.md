@@ -338,6 +338,9 @@ dan user mode.
   - [x] orphan zombie reaped by init
 - [x] Tambah `/bin/kill` atau signal placeholder untuk process control berikutnya.
 - [x] Kurangkan kernel debug output yang bocor ke VGA untuk userland command normal.
+- [x] Asingkan console boot: VGA hanya untuk login/sesi pengguna, manakala kernel,
+  driver, PID 1, dan `stderr` dihantar ke serial debug console.
+- [x] Nyahaktifkan kernel shell dan text-mode mouse cursor daripada laluan boot normal.
 
 ## Milestone 18: Memory Protection Hardening
 
@@ -840,16 +843,29 @@ Deferred filesystem hardening:
     - [x] Tambah parser EDID base block tervalidasi (header/checksum/identity/preferred timing).
     - [x] Model dan expose output firmware aktif serta status EDID melalui `/dev/display0`.
     - [ ] Bekalkan bytes EDID melalui DDC/backend GPU, enumerate multi-output, hotplug, dan modeset.
-  - [ ] VirtIO-GPU PCI, control queue, resource, dan scanout backend.
+  - [x] VirtIO-GPU PCI, control queue, resource, dan scanout backend.
     - [x] Discovery modern PCI transport, BAR, dan vendor capabilities serta expose
       `/dev/virtio-gpu` dengan regression QEMU `virtio-vga`.
     - [x] Feature negotiation dan control virtqueue foundation.
       - [x] Negotiate `VIRTIO_F_VERSION_1`, lengkapkan status handshake, dan enable
         queue 0 menggunakan descriptor/available/used DMA frames.
-    - [ ] Display-info command, 2D resource, backing storage, transfer/flush, dan scanout.
+    - [x] Display-info command, 2D resource, backing storage, transfer/flush, dan scanout.
+      - [x] Hantar `GET_DISPLAY_INFO` melalui controlq, validate response `0x1101`, dan
+        discover primary scanout `1280x800` daripada QEMU.
+      - [x] Create 2D resource, attach contiguous backing pages, render corak ujian,
+        transfer, flush, dan set primary scanout dengan regression QEMU.
+      - [x] Sambungkan generic display API dan compositor kernel kepada backing scanout
+        VirtIO-GPU; setiap present menjalankan transfer dan flush tervalidasi.
   - [ ] Shared graphics buffers untuk proses user, fence, dan isolation.
   - [ ] Migrasi display server/compositor ke user mode.
   - [ ] Window protocol, input focus, font rendering, dan GUI toolkit.
+    - [x] ABI v1.15 surface lifecycle: create, configure, set color, focus, dan destroy.
+    - [x] Enforce ownership surface mengikut PID, geometry/quantity limits, dan
+      QEMU Ring-3 regression melalui `/bin/windowdemo` pada VirtIO-GPU.
+    - [x] Reclaim surface milik proses secara automatik apabila proses exit.
+    - [x] Damage-region submission dan synchronous frame-fence completion melalui ABI v1.16.
+    - [x] Hadkan compositor redraw, scanout copy, VirtIO transfer, dan flush kepada rectangle rosak.
+    - [ ] Shared pixel buffers, asynchronous frame callback, dan input event routing.
 
 ### Phase E: Virtual Memory, SMP, And Scheduler Maturity
 

@@ -193,12 +193,12 @@ fn kernel_main(
     } else {
         kernel::drivers::framebuffer::init();
     }
+    kernel::drivers::pci::init();
+    kernel::drivers::virtio_gpu::init(phys_mem_offset, &mut frame_allocator);
     kernel::drivers::display::init();
     kernel::drivers::compositor::init();
     kernel::user::init();
     kernel::scheduler::SCHEDULER.create_idle_task();
-    kernel::drivers::pci::init();
-    kernel::drivers::virtio_gpu::init(phys_mem_offset, &mut frame_allocator);
     kernel::drivers::ahci::init(&mut mapper, &mut frame_allocator, phys_mem_offset);
     kernel::drivers::nvme::init(&mut mapper, &mut frame_allocator, phys_mem_offset);
     kernel::drivers::network::init(&mut mapper, &mut frame_allocator, phys_mem_offset);
@@ -281,8 +281,6 @@ fn kernel_main(
         }
     }
 
-    kernel::shell::init();
-
     #[cfg(feature = "ahci-write-test")]
     kernel::drivers::ahci::run_write_test();
     #[cfg(feature = "nvme-write-test")]
@@ -297,9 +295,6 @@ fn kernel_main(
         Ok(pid) => serial_println!("[USER] boot policy queued /bin/init pid={}", pid),
         Err(err) => serial_println!("[USER] boot policy skipped /bin/init: {:?}", err),
     }
-
-    // Draw initial mouse cursor and update on input events
-    kernel::vga_buffer::draw_mouse_cursor(40, 12);
 
     let runtime_tid =
         kernel::scheduler::SCHEDULER.create_task(kernel::runtime::kernel_event_thread);

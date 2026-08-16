@@ -22,6 +22,22 @@ const STATUS_FEATURES_OK: u8 = 8;
 const CONTROL_QUEUE_INDEX: u16 = 0;
 const MAX_CONTROL_QUEUE_SIZE: u16 = 256;
 const COMMON_CFG_MIN_LENGTH: u32 = 56;
+const VIRTIO_GPU_CMD_GET_DISPLAY_INFO: u32 = 0x0100;
+const VIRTIO_GPU_CMD_RESOURCE_CREATE_2D: u32 = 0x0101;
+const VIRTIO_GPU_CMD_SET_SCANOUT: u32 = 0x0103;
+const VIRTIO_GPU_CMD_RESOURCE_FLUSH: u32 = 0x0104;
+const VIRTIO_GPU_CMD_TRANSFER_TO_HOST_2D: u32 = 0x0105;
+const VIRTIO_GPU_CMD_RESOURCE_ATTACH_BACKING: u32 = 0x0106;
+const VIRTIO_GPU_RESP_OK_NODATA: u32 = 0x1100;
+const VIRTIO_GPU_RESP_OK_DISPLAY_INFO: u32 = 0x1101;
+const VIRTIO_GPU_FORMAT_B8G8R8X8_UNORM: u32 = 2;
+const PRIMARY_RESOURCE_ID: u32 = 1;
+const VIRTQ_DESC_F_NEXT: u16 = 1;
+const VIRTQ_DESC_F_WRITE: u16 = 2;
+const GPU_RESPONSE_OFFSET: usize = 64;
+const GPU_CTRL_HEADER_SIZE: u32 = 24;
+const GPU_DISPLAY_INFO_SIZE: u32 = 24 + 16 * 24;
+const COMMAND_POLL_LIMIT: usize = 10_000_000;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct VirtioPciCapability {
@@ -40,6 +56,7 @@ pub struct VirtioGpuInfo {
     pub isr: Option<VirtioPciCapability>,
     pub device: Option<VirtioPciCapability>,
     pub capability_count: u8,
+    pub notify_multiplier: u32,
     pub device_features: u64,
     pub negotiated_features: u64,
     pub features_ok: bool,
@@ -49,6 +66,22 @@ pub struct VirtioGpuInfo {
     pub descriptor_frame: u64,
     pub available_frame: u64,
     pub used_frame: u64,
+    pub command_frame: u64,
+    pub commands_submitted: u64,
+    pub commands_completed: u64,
+    pub response_type: u32,
+    pub scanout_count: u8,
+    pub primary_enabled: bool,
+    pub primary_width: u32,
+    pub primary_height: u32,
+    pub resource_created: bool,
+    pub backing_attached: bool,
+    pub transfer_complete: bool,
+    pub flush_complete: bool,
+    pub scanout_configured: bool,
+    pub backing_frame: u64,
+    pub backing_bytes: u64,
+    pub physical_memory_offset: u64,
 }
 
 impl VirtioGpuInfo {
@@ -62,6 +95,7 @@ impl VirtioGpuInfo {
             isr: None,
             device: None,
             capability_count: 0,
+            notify_multiplier: 0,
             device_features: 0,
             negotiated_features: 0,
             features_ok: false,
@@ -71,6 +105,22 @@ impl VirtioGpuInfo {
             descriptor_frame: 0,
             available_frame: 0,
             used_frame: 0,
+            command_frame: 0,
+            commands_submitted: 0,
+            commands_completed: 0,
+            response_type: 0,
+            scanout_count: 0,
+            primary_enabled: false,
+            primary_width: 0,
+            primary_height: 0,
+            resource_created: false,
+            backing_attached: false,
+            transfer_complete: false,
+            flush_complete: false,
+            scanout_configured: false,
+            backing_frame: 0,
+            backing_bytes: 0,
+            physical_memory_offset: 0,
         }
     }
 
@@ -93,6 +143,11 @@ enum TransportError {
     UnsupportedQueueSize,
     FrameAllocationFailed,
     QueueEnableFailed,
+    InvalidNotifyConfig,
+    CommandTimeout,
+    InvalidGpuResponse,
+    InvalidDisplayMode,
+    NonContiguousBacking,
 }
 
 #[derive(Clone, Copy)]
@@ -199,12 +254,24 @@ pub fn init(physical_memory_offset: VirtAddr, frame_allocator: &mut impl FrameAl
         detected: true,
         pci: Some(device),
         bar0: pci::read_bar_info(device, 0),
+        physical_memory_offset: physical_memory_offset.as_u64(),
         ..VirtioGpuInfo::empty()
     };
     discover_capabilities(device, &mut info);
-    let transport_result =
-        initialize_transport(device, physical_memory_offset, frame_allocator, &mut info);
-    let ready = transport_result.is_ok();
+    let command_result =
+        initialize_transport(device, physical_memory_offset, frame_allocator, &mut info)
+            .and_then(|()| {
+                get_display_info(device, physical_memory_offset, frame_allocator, &mut info)
+            })
+            .and_then(|()| {
+                initialize_primary_resource(
+                    device,
+                    physical_memory_offset,
+                    frame_allocator,
+                    &mut info,
+                )
+            });
+    let ready = command_result.is_ok();
     crate::drivers::status::report(
         "virtio-gpu",
         if ready {
@@ -213,13 +280,13 @@ pub fn init(physical_memory_offset: VirtAddr, frame_allocator: &mut impl FrameAl
             crate::drivers::status::DriverState::Degraded
         },
         if ready {
-            "VERSION_1 negotiated; control virtqueue enabled"
+            "VirtIO-GPU 2D resource attached and scanned out"
         } else {
             "device found; modern PCI capabilities incomplete"
         },
     );
     crate::serial_println!(
-        "[VIRTIO-GPU] {:02x}:{:02x}.{} vendor={:04x} device={:04x} bar0={:?} capabilities={} common={} notify={} isr={} device_cfg={} transport_ready={} version1={} features_ok={} queue_size={} queue_enabled={} driver_ok={} init={:?}",
+        "[VIRTIO-GPU] {:02x}:{:02x}.{} vendor={:04x} device={:04x} bar0={:?} capabilities={} common={} notify={} isr={} device_cfg={} transport_ready={} version1={} features_ok={} queue_size={} queue_enabled={} driver_ok={} commands={}/{} response={:#x} scanouts={} primary={}x{} enabled={} resource={} backing={} transfer={} flush={} scanout={} bytes={} init={:?}",
         device.bus,
         device.slot,
         device.function,
@@ -237,9 +304,88 @@ pub fn init(physical_memory_offset: VirtAddr, frame_allocator: &mut impl FrameAl
         info.control_queue_size,
         info.control_queue_enabled,
         info.driver_ok,
-        transport_result
+        info.commands_completed,
+        info.commands_submitted,
+        info.response_type,
+        info.scanout_count,
+        info.primary_width,
+        info.primary_height,
+        info.primary_enabled,
+        info.resource_created,
+        info.backing_attached,
+        info.transfer_complete,
+        info.flush_complete,
+        info.scanout_configured,
+        info.backing_bytes,
+        command_result
     );
     *INFO.lock() = info;
+}
+
+pub fn info() -> VirtioGpuInfo {
+    *INFO.lock()
+}
+
+pub fn present(buffer: &[u8]) -> bool {
+    let info = info();
+    present_region(
+        buffer,
+        0,
+        0,
+        info.primary_width as usize,
+        info.primary_height as usize,
+        info.primary_width as usize * 4,
+    )
+}
+
+pub fn present_region(
+    buffer: &[u8],
+    x: usize,
+    y: usize,
+    width: usize,
+    height: usize,
+    stride: usize,
+) -> bool {
+    let mut info = INFO.lock();
+    if !info.scanout_configured
+        || buffer.len() as u64 != info.backing_bytes
+        || stride != info.primary_width as usize * 4
+        || x.saturating_add(width) > info.primary_width as usize
+        || y.saturating_add(height) > info.primary_height as usize
+        || width == 0
+        || height == 0
+    {
+        return false;
+    }
+    let Some(device) = info.pci else {
+        return false;
+    };
+    let physical_memory_offset = VirtAddr::new(info.physical_memory_offset);
+    let backing = (physical_memory_offset + info.backing_frame).as_mut_ptr::<u8>();
+    let row_offset = x * 4;
+    let row_bytes = width * 4;
+    for row in y..y + height {
+        let offset = row * stride + row_offset;
+        // SAFETY: region validation bounds each source and destination row to
+        // the equally sized compositor and GPU backing buffers.
+        unsafe {
+            core::ptr::copy_nonoverlapping(
+                buffer.as_ptr().add(offset),
+                backing.add(offset),
+                row_bytes,
+            )
+        };
+    }
+    transfer_and_flush_region(
+        device,
+        physical_memory_offset,
+        &mut info,
+        x as u32,
+        y as u32,
+        width as u32,
+        height as u32,
+    )
+    .is_ok()
 }
 
 fn initialize_transport(
@@ -371,6 +517,448 @@ fn allocate_zeroed_frame(
     Ok(physical)
 }
 
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct VirtqDescriptor {
+    address: u64,
+    length: u32,
+    flags: u16,
+    next: u16,
+}
+
+fn get_display_info(
+    pci_device: PciDevice,
+    physical_memory_offset: VirtAddr,
+    frame_allocator: &mut impl FrameAllocator<Size4KiB>,
+    info: &mut VirtioGpuInfo,
+) -> Result<(), TransportError> {
+    let common = capability_region(
+        pci_device,
+        info.common.ok_or(TransportError::MissingCommonConfig)?,
+        physical_memory_offset,
+    )?;
+    let notify_cap = info.notify.ok_or(TransportError::InvalidNotifyConfig)?;
+    if info.notify_multiplier == 0 {
+        return Err(TransportError::InvalidNotifyConfig);
+    }
+    common.write_u16(22, CONTROL_QUEUE_INDEX);
+    let queue_notify_off = common
+        .read_u16(30)
+        .ok_or(TransportError::InvalidCommonConfig)?;
+    let notify_offset = u64::from(queue_notify_off)
+        .checked_mul(u64::from(info.notify_multiplier))
+        .ok_or(TransportError::InvalidNotifyConfig)?;
+    if notify_offset + 2 > u64::from(notify_cap.length) {
+        return Err(TransportError::InvalidNotifyConfig);
+    }
+    let notify = capability_region(pci_device, notify_cap, physical_memory_offset)?;
+
+    let command = allocate_zeroed_frame(physical_memory_offset, frame_allocator)?;
+    info.command_frame = command;
+    let command_virtual = physical_memory_offset + command;
+    // SAFETY: command is a uniquely allocated DMA frame and the request type
+    // occupies the naturally aligned first u32 of the request header.
+    unsafe {
+        command_virtual
+            .as_mut_ptr::<u32>()
+            .write(VIRTIO_GPU_CMD_GET_DISPLAY_INFO)
+    };
+
+    let descriptors =
+        (physical_memory_offset + info.descriptor_frame).as_mut_ptr::<VirtqDescriptor>();
+    // SAFETY: queue-size validation reserves at least two complete descriptors
+    // in the uniquely owned descriptor-table frame.
+    unsafe {
+        descriptors.write(VirtqDescriptor {
+            address: command,
+            length: GPU_CTRL_HEADER_SIZE,
+            flags: VIRTQ_DESC_F_NEXT,
+            next: 1,
+        });
+        descriptors.add(1).write(VirtqDescriptor {
+            address: command + GPU_RESPONSE_OFFSET as u64,
+            length: GPU_DISPLAY_INFO_SIZE,
+            flags: VIRTQ_DESC_F_WRITE,
+            next: 0,
+        });
+    }
+
+    let available = physical_memory_offset + info.available_frame;
+    // SAFETY: split-ring avail.idx is u16 at byte 2 and ring[0] is u16 at byte
+    // 4 inside the dedicated driver-owned available-ring frame.
+    unsafe {
+        available.as_mut_ptr::<u16>().add(2).write(0);
+        core::sync::atomic::fence(core::sync::atomic::Ordering::Release);
+        available.as_mut_ptr::<u16>().add(1).write_volatile(1);
+    }
+    info.commands_submitted = 1;
+    if !notify.write_u16(notify_offset as usize, CONTROL_QUEUE_INDEX) {
+        return Err(TransportError::InvalidNotifyConfig);
+    }
+
+    let used = physical_memory_offset + info.used_frame;
+    let mut completed = false;
+    for _ in 0..COMMAND_POLL_LIMIT {
+        // SAFETY: split-ring used.idx is device-written at byte 2 of the
+        // dedicated used-ring frame and requires a volatile read.
+        if unsafe { used.as_ptr::<u16>().add(1).read_volatile() } != 0 {
+            completed = true;
+            break;
+        }
+        core::hint::spin_loop();
+    }
+    if !completed {
+        return Err(TransportError::CommandTimeout);
+    }
+    core::sync::atomic::fence(core::sync::atomic::Ordering::Acquire);
+    info.commands_completed = 1;
+
+    // SAFETY: used.idx completion returns the bounded response descriptor to
+    // the driver; the response header starts at a four-byte aligned offset.
+    let response = unsafe {
+        command_virtual
+            .as_ptr::<u8>()
+            .add(GPU_RESPONSE_OFFSET)
+            .cast::<u32>()
+    };
+    info.response_type = unsafe { response.read_volatile() };
+    if info.response_type != VIRTIO_GPU_RESP_OK_DISPLAY_INFO {
+        return Err(TransportError::InvalidGpuResponse);
+    }
+
+    for index in 0..16usize {
+        let mode_offset = GPU_RESPONSE_OFFSET + 24 + index * 24;
+        // SAFETY: all three fields are aligned and contained in the completed
+        // 408-byte display-info response descriptor.
+        let width = unsafe {
+            command_virtual
+                .as_ptr::<u8>()
+                .add(mode_offset + 8)
+                .cast::<u32>()
+                .read_volatile()
+        };
+        let height = unsafe {
+            command_virtual
+                .as_ptr::<u8>()
+                .add(mode_offset + 12)
+                .cast::<u32>()
+                .read_volatile()
+        };
+        let enabled = unsafe {
+            command_virtual
+                .as_ptr::<u8>()
+                .add(mode_offset + 16)
+                .cast::<u32>()
+                .read_volatile()
+        } != 0;
+        if enabled {
+            info.scanout_count = info.scanout_count.saturating_add(1);
+            if info.scanout_count == 1 {
+                info.primary_enabled = true;
+                info.primary_width = width;
+                info.primary_height = height;
+            }
+        }
+    }
+    Ok(())
+}
+
+fn initialize_primary_resource(
+    pci_device: PciDevice,
+    physical_memory_offset: VirtAddr,
+    frame_allocator: &mut impl FrameAllocator<Size4KiB>,
+    info: &mut VirtioGpuInfo,
+) -> Result<(), TransportError> {
+    let width = info.primary_width;
+    let height = info.primary_height;
+    if !info.primary_enabled || width == 0 || height == 0 {
+        return Err(TransportError::InvalidDisplayMode);
+    }
+    let backing_bytes = u64::from(width)
+        .checked_mul(u64::from(height))
+        .and_then(|pixels| pixels.checked_mul(4))
+        .ok_or(TransportError::InvalidDisplayMode)?;
+    let frame_count = backing_bytes.div_ceil(Size4KiB::SIZE);
+    let backing_frame =
+        allocate_contiguous_frames(physical_memory_offset, frame_allocator, frame_count)?;
+    info.backing_frame = backing_frame;
+    info.backing_bytes = backing_bytes;
+    fill_test_pattern(physical_memory_offset, backing_frame, width, height);
+
+    prepare_command(physical_memory_offset, info.command_frame, |request| {
+        write_u32(request, 0, VIRTIO_GPU_CMD_RESOURCE_CREATE_2D);
+        write_u32(request, 24, PRIMARY_RESOURCE_ID);
+        write_u32(request, 28, VIRTIO_GPU_FORMAT_B8G8R8X8_UNORM);
+        write_u32(request, 32, width);
+        write_u32(request, 36, height);
+    });
+    submit_control_command(
+        pci_device,
+        physical_memory_offset,
+        info,
+        40,
+        GPU_CTRL_HEADER_SIZE,
+        VIRTIO_GPU_RESP_OK_NODATA,
+    )?;
+    info.resource_created = true;
+
+    prepare_command(physical_memory_offset, info.command_frame, |request| {
+        write_u32(request, 0, VIRTIO_GPU_CMD_RESOURCE_ATTACH_BACKING);
+        write_u32(request, 24, PRIMARY_RESOURCE_ID);
+        write_u32(request, 28, 1);
+        write_u64(request, 32, backing_frame);
+        write_u32(request, 40, backing_bytes as u32);
+    });
+    submit_control_command(
+        pci_device,
+        physical_memory_offset,
+        info,
+        48,
+        GPU_CTRL_HEADER_SIZE,
+        VIRTIO_GPU_RESP_OK_NODATA,
+    )?;
+    info.backing_attached = true;
+
+    prepare_command(physical_memory_offset, info.command_frame, |request| {
+        write_u32(request, 0, VIRTIO_GPU_CMD_TRANSFER_TO_HOST_2D);
+        write_rect(request, width, height);
+        write_u64(request, 40, 0);
+        write_u32(request, 48, PRIMARY_RESOURCE_ID);
+    });
+    submit_control_command(
+        pci_device,
+        physical_memory_offset,
+        info,
+        56,
+        GPU_CTRL_HEADER_SIZE,
+        VIRTIO_GPU_RESP_OK_NODATA,
+    )?;
+    info.transfer_complete = true;
+
+    prepare_command(physical_memory_offset, info.command_frame, |request| {
+        write_u32(request, 0, VIRTIO_GPU_CMD_RESOURCE_FLUSH);
+        write_rect(request, width, height);
+        write_u32(request, 40, PRIMARY_RESOURCE_ID);
+    });
+    submit_control_command(
+        pci_device,
+        physical_memory_offset,
+        info,
+        48,
+        GPU_CTRL_HEADER_SIZE,
+        VIRTIO_GPU_RESP_OK_NODATA,
+    )?;
+    info.flush_complete = true;
+
+    prepare_command(physical_memory_offset, info.command_frame, |request| {
+        write_u32(request, 0, VIRTIO_GPU_CMD_SET_SCANOUT);
+        write_rect(request, width, height);
+        write_u32(request, 40, 0);
+        write_u32(request, 44, PRIMARY_RESOURCE_ID);
+    });
+    submit_control_command(
+        pci_device,
+        physical_memory_offset,
+        info,
+        48,
+        GPU_CTRL_HEADER_SIZE,
+        VIRTIO_GPU_RESP_OK_NODATA,
+    )?;
+    info.scanout_configured = true;
+    Ok(())
+}
+
+fn transfer_and_flush_region(
+    pci_device: PciDevice,
+    physical_memory_offset: VirtAddr,
+    info: &mut VirtioGpuInfo,
+    x: u32,
+    y: u32,
+    width: u32,
+    height: u32,
+) -> Result<(), TransportError> {
+    let backing_offset = (u64::from(y) * u64::from(info.primary_width) + u64::from(x)) * 4;
+    prepare_command(physical_memory_offset, info.command_frame, |request| {
+        write_u32(request, 0, VIRTIO_GPU_CMD_TRANSFER_TO_HOST_2D);
+        write_rect_at(request, x, y, width, height);
+        write_u64(request, 40, backing_offset);
+        write_u32(request, 48, PRIMARY_RESOURCE_ID);
+    });
+    submit_control_command(
+        pci_device,
+        physical_memory_offset,
+        info,
+        56,
+        GPU_CTRL_HEADER_SIZE,
+        VIRTIO_GPU_RESP_OK_NODATA,
+    )?;
+
+    prepare_command(physical_memory_offset, info.command_frame, |request| {
+        write_u32(request, 0, VIRTIO_GPU_CMD_RESOURCE_FLUSH);
+        write_rect_at(request, x, y, width, height);
+        write_u32(request, 40, PRIMARY_RESOURCE_ID);
+    });
+    submit_control_command(
+        pci_device,
+        physical_memory_offset,
+        info,
+        48,
+        GPU_CTRL_HEADER_SIZE,
+        VIRTIO_GPU_RESP_OK_NODATA,
+    )
+}
+
+fn allocate_contiguous_frames(
+    physical_memory_offset: VirtAddr,
+    frame_allocator: &mut impl FrameAllocator<Size4KiB>,
+    count: u64,
+) -> Result<u64, TransportError> {
+    if count == 0 || count > 4096 {
+        return Err(TransportError::InvalidDisplayMode);
+    }
+    let first = allocate_zeroed_frame(physical_memory_offset, frame_allocator)?;
+    for index in 1..count {
+        let frame = allocate_zeroed_frame(physical_memory_offset, frame_allocator)?;
+        if frame != first + index * Size4KiB::SIZE {
+            return Err(TransportError::NonContiguousBacking);
+        }
+    }
+    Ok(first)
+}
+
+fn fill_test_pattern(physical_memory_offset: VirtAddr, frame: u64, width: u32, height: u32) {
+    let pixels = (physical_memory_offset + frame).as_mut_ptr::<u32>();
+    for y in 0..height {
+        for x in 0..width {
+            let blue = x.saturating_mul(255) / width;
+            let green = y.saturating_mul(255) / height;
+            let red = if (x / 64 + y / 64) % 2 == 0 {
+                0x40
+            } else {
+                0xa0
+            };
+            let value = blue | (green << 8) | (red << 16);
+            // SAFETY: the backing allocation contains width*height u32 pixels.
+            unsafe {
+                pixels
+                    .add((u64::from(y) * u64::from(width) + u64::from(x)) as usize)
+                    .write(value)
+            };
+        }
+    }
+}
+
+fn prepare_command(
+    physical_memory_offset: VirtAddr,
+    command_frame: u64,
+    write: impl FnOnce(*mut u8),
+) {
+    let request = (physical_memory_offset + command_frame).as_mut_ptr::<u8>();
+    // SAFETY: the command frame is exclusively owned by this serialized driver.
+    unsafe { core::ptr::write_bytes(request, 0, Size4KiB::SIZE as usize) };
+    write(request);
+}
+
+fn submit_control_command(
+    pci_device: PciDevice,
+    physical_memory_offset: VirtAddr,
+    info: &mut VirtioGpuInfo,
+    request_length: u32,
+    response_length: u32,
+    expected_response: u32,
+) -> Result<(), TransportError> {
+    let descriptors =
+        (physical_memory_offset + info.descriptor_frame).as_mut_ptr::<VirtqDescriptor>();
+    // SAFETY: descriptors 0 and 1 are within the validated control queue table.
+    unsafe {
+        descriptors.write(VirtqDescriptor {
+            address: info.command_frame,
+            length: request_length,
+            flags: VIRTQ_DESC_F_NEXT,
+            next: 1,
+        });
+        descriptors.add(1).write(VirtqDescriptor {
+            address: info.command_frame + GPU_RESPONSE_OFFSET as u64,
+            length: response_length,
+            flags: VIRTQ_DESC_F_WRITE,
+            next: 0,
+        });
+    }
+
+    let target = (info.commands_submitted as u16).wrapping_add(1);
+    let slot = info.commands_submitted as usize % usize::from(info.control_queue_size);
+    let available = physical_memory_offset + info.available_frame;
+    // SAFETY: slot is reduced modulo the negotiated queue size.
+    unsafe {
+        available.as_mut_ptr::<u16>().add(2 + slot).write(0);
+        core::sync::atomic::fence(core::sync::atomic::Ordering::Release);
+        available.as_mut_ptr::<u16>().add(1).write_volatile(target);
+    }
+    info.commands_submitted += 1;
+
+    let common = capability_region(
+        pci_device,
+        info.common.ok_or(TransportError::MissingCommonConfig)?,
+        physical_memory_offset,
+    )?;
+    common.write_u16(22, CONTROL_QUEUE_INDEX);
+    let queue_notify_off = common
+        .read_u16(30)
+        .ok_or(TransportError::InvalidCommonConfig)?;
+    let notify_offset = u64::from(queue_notify_off)
+        .checked_mul(u64::from(info.notify_multiplier))
+        .ok_or(TransportError::InvalidNotifyConfig)?;
+    let notify_cap = info.notify.ok_or(TransportError::InvalidNotifyConfig)?;
+    let notify = capability_region(pci_device, notify_cap, physical_memory_offset)?;
+    if !notify.write_u16(notify_offset as usize, CONTROL_QUEUE_INDEX) {
+        return Err(TransportError::InvalidNotifyConfig);
+    }
+
+    let used = physical_memory_offset + info.used_frame;
+    for _ in 0..COMMAND_POLL_LIMIT {
+        // SAFETY: used.idx is device-owned and lies inside the used-ring frame.
+        if unsafe { used.as_ptr::<u16>().add(1).read_volatile() } == target {
+            core::sync::atomic::fence(core::sync::atomic::Ordering::Acquire);
+            info.commands_completed += 1;
+            let response =
+                (physical_memory_offset + info.command_frame + GPU_RESPONSE_OFFSET as u64)
+                    .as_ptr::<u32>();
+            // SAFETY: the response descriptor has completed and contains its header.
+            info.response_type = unsafe { response.read_volatile() };
+            return if info.response_type == expected_response {
+                Ok(())
+            } else {
+                Err(TransportError::InvalidGpuResponse)
+            };
+        }
+        core::hint::spin_loop();
+    }
+    Err(TransportError::CommandTimeout)
+}
+
+fn write_u32(base: *mut u8, offset: usize, value: u32) {
+    // SAFETY: callers provide the driver-owned, zeroed command page and all
+    // command layouts use aligned u32 fields within that page.
+    unsafe { base.add(offset).cast::<u32>().write(value) };
+}
+
+fn write_u64(base: *mut u8, offset: usize, value: u64) {
+    // SAFETY: callers provide the driver-owned, zeroed command page and all
+    // command layouts use aligned u64 fields within that page.
+    unsafe { base.add(offset).cast::<u64>().write(value) };
+}
+
+fn write_rect(base: *mut u8, width: u32, height: u32) {
+    write_rect_at(base, 0, 0, width, height);
+}
+
+fn write_rect_at(base: *mut u8, x: u32, y: u32, width: u32, height: u32) {
+    write_u32(base, 24, x);
+    write_u32(base, 28, y);
+    write_u32(base, 32, width);
+    write_u32(base, 36, height);
+}
+
 fn is_virtio_gpu(device: &PciDevice) -> bool {
     device.vendor_id == VIRTIO_VENDOR_ID
         && device.device_id == VIRTIO_GPU_DEVICE_ID
@@ -411,7 +999,17 @@ fn discover_capabilities(device: PciDevice, info: &mut VirtioGpuInfo) {
                 info.capability_count = info.capability_count.saturating_add(1);
                 match cfg_type {
                     VIRTIO_PCI_CAP_COMMON_CFG => info.common = Some(capability),
-                    VIRTIO_PCI_CAP_NOTIFY_CFG => info.notify = Some(capability),
+                    VIRTIO_PCI_CAP_NOTIFY_CFG => {
+                        info.notify = Some(capability);
+                        if cap_len >= 20 && pointer <= 0xe8 {
+                            info.notify_multiplier = pci::read_config_u32(
+                                device.bus,
+                                device.slot,
+                                device.function,
+                                pointer + 16,
+                            );
+                        }
+                    }
                     VIRTIO_PCI_CAP_ISR_CFG => info.isr = Some(capability),
                     VIRTIO_PCI_CAP_DEVICE_CFG => info.device = Some(capability),
                     _ => {}
@@ -452,6 +1050,32 @@ pub fn write_to_buffer(out: &mut [u8]) -> usize {
     writer.bool(info.control_queue_enabled);
     writer.text(" driver-ok=");
     writer.bool(info.driver_ok);
+    writer.text(" commands=");
+    writer.dec(info.commands_completed);
+    writer.byte(b'/');
+    writer.dec(info.commands_submitted);
+    writer.text(" response=0x");
+    writer.hex(u64::from(info.response_type), 4);
+    writer.text(" scanouts=");
+    writer.dec(u64::from(info.scanout_count));
+    writer.text(" primary=");
+    writer.dec(u64::from(info.primary_width));
+    writer.byte(b'x');
+    writer.dec(u64::from(info.primary_height));
+    writer.text(" enabled=");
+    writer.bool(info.primary_enabled);
+    writer.text(" resource=");
+    writer.bool(info.resource_created);
+    writer.text(" backing=");
+    writer.bool(info.backing_attached);
+    writer.text(" transfer=");
+    writer.bool(info.transfer_complete);
+    writer.text(" flush=");
+    writer.bool(info.flush_complete);
+    writer.text(" scanout=");
+    writer.bool(info.scanout_configured);
+    writer.text(" bytes=");
+    writer.dec(info.backing_bytes);
     writer.byte(b'\n');
     writer.len
 }
@@ -489,6 +1113,16 @@ impl Writer<'_> {
         }
         for byte in &digits[start..] {
             self.byte(*byte);
+        }
+    }
+    fn hex(&mut self, value: u64, digits: usize) {
+        for shift in (0..digits).rev() {
+            let nibble = ((value >> (shift * 4)) & 0xf) as u8;
+            self.byte(if nibble < 10 {
+                b'0' + nibble
+            } else {
+                b'a' + nibble - 10
+            });
         }
     }
 }

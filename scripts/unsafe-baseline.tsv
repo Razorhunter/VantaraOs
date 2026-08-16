@@ -12,7 +12,7 @@ kernel/src/drivers/nvme.rs	6
 kernel/src/drivers/pci.rs	2
 kernel/src/drivers/ps2.rs	7
 kernel/src/drivers/usb_host.rs	28
-kernel/src/drivers/virtio_gpu.rs	8
+kernel/src/drivers/virtio_gpu.rs	26
 kernel/src/drivers/xhci.rs	17
 kernel/src/gdt.rs	1
 kernel/src/interrupts.rs	9

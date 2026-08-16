@@ -29,15 +29,11 @@ pub fn print_banner() {
     );
     serial_println!(" built: {}", crate::build_info::BUILD_TIMESTAMP);
     serial_println!("========================================");
-
-    println!("Vantara OS Kernel {}", crate::build_info::VERSION);
-    println!("Boot diagnostics: starting");
 }
 
 fn mark(bit: u32, name: &str) {
     BOOT_CHECKS.fetch_or(bit, Ordering::Relaxed);
     log_info!("boot check ok: {}", name);
-    println!("[ok] {}", name);
 }
 
 fn mark_quiet(bit: u32, name: &str) {

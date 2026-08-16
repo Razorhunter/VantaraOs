@@ -48,11 +48,31 @@ impl Rect {
             && x < self.x.saturating_add(self.width)
             && y < self.y.saturating_add(self.height)
     }
+
+    fn union(self, other: Self) -> Self {
+        let x = self.x.min(other.x);
+        let y = self.y.min(other.y);
+        let right = self
+            .x
+            .saturating_add(self.width)
+            .max(other.x.saturating_add(other.width));
+        let bottom = self
+            .y
+            .saturating_add(self.height)
+            .max(other.y.saturating_add(other.height));
+        Self {
+            x,
+            y,
+            width: right.saturating_sub(x),
+            height: bottom.saturating_sub(y),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Surface {
     pub id: u32,
+    pub owner_pid: u32,
     pub bounds: Rect,
     pub color: u8,
     pub z: i16,
@@ -71,6 +91,21 @@ struct Compositor {
     frames: u64,
     damaged_pixels: u64,
     checksum: u32,
+    next_surface_id: u32,
+    focused_surface: Option<u32>,
+    protocol_requests: u64,
+    rejected_requests: u64,
+}
+
+const MAX_SURFACES: usize = 64;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SurfaceError {
+    Unavailable,
+    InvalidGeometry,
+    LimitReached,
+    NotFound,
+    PermissionDenied,
 }
 
 static COMPOSITOR: Mutex<Option<Compositor>> = Mutex::new(None);
@@ -97,9 +132,14 @@ pub fn init() {
         frames: 0,
         damaged_pixels: 0,
         checksum: 0,
+        next_surface_id: 3,
+        focused_surface: None,
+        protocol_requests: 0,
+        rejected_requests: 0,
     };
     compositor.add_surface(Surface {
         id: 1,
+        owner_pid: 0,
         bounds: Rect {
             x: 24,
             y: 24,
@@ -112,6 +152,7 @@ pub fn init() {
     });
     compositor.add_surface(Surface {
         id: 2,
+        owner_pid: 0,
         bounds: Rect {
             x: 112,
             y: 68,
@@ -146,6 +187,225 @@ pub fn init() {
         display::info().rejected_flips
     );
     *COMPOSITOR.lock() = Some(compositor);
+}
+
+pub fn create_surface(
+    owner_pid: u32,
+    x: usize,
+    y: usize,
+    width: usize,
+    height: usize,
+    color: u8,
+) -> Result<u32, SurfaceError> {
+    with_compositor(|compositor| {
+        if width == 0
+            || height == 0
+            || x >= compositor.width
+            || y >= compositor.height
+            || width > compositor.width
+            || height > compositor.height
+        {
+            return Err(SurfaceError::InvalidGeometry);
+        }
+        if compositor.surfaces.len() >= MAX_SURFACES {
+            return Err(SurfaceError::LimitReached);
+        }
+        let id = compositor.next_surface_id;
+        compositor.next_surface_id = compositor.next_surface_id.saturating_add(1);
+        let z = compositor
+            .surfaces
+            .iter()
+            .map(|surface| surface.z)
+            .max()
+            .unwrap_or(0)
+            .saturating_add(1);
+        let bounds = Rect {
+            x,
+            y,
+            width,
+            height,
+        };
+        compositor.add_surface(Surface {
+            id,
+            owner_pid,
+            bounds,
+            color: color & 0x0f,
+            z,
+            visible: true,
+        });
+        compositor.focused_surface = Some(id);
+        compositor.redraw(bounds);
+        Ok(id)
+    })
+}
+
+pub fn configure_surface(
+    owner_pid: u32,
+    id: u32,
+    x: usize,
+    y: usize,
+    width: usize,
+    height: usize,
+) -> Result<(), SurfaceError> {
+    with_compositor(|compositor| {
+        if width == 0 || height == 0 || x >= compositor.width || y >= compositor.height {
+            return Err(SurfaceError::InvalidGeometry);
+        }
+        let screen_width = compositor.width;
+        let screen_height = compositor.height;
+        let surface = owned_surface_mut(compositor, owner_pid, id)?;
+        let old_bounds = surface.bounds;
+        let new_bounds = Rect {
+            x,
+            y,
+            width,
+            height,
+        }
+        .clipped(screen_width, screen_height);
+        surface.bounds = new_bounds;
+        compositor.redraw(old_bounds.union(new_bounds));
+        Ok(())
+    })
+}
+
+pub fn set_surface_color(owner_pid: u32, id: u32, color: u8) -> Result<(), SurfaceError> {
+    with_compositor(|compositor| {
+        let surface = owned_surface_mut(compositor, owner_pid, id)?;
+        surface.color = color & 0x0f;
+        let bounds = surface.bounds;
+        compositor.redraw(bounds);
+        Ok(())
+    })
+}
+
+pub fn focus_surface(owner_pid: u32, id: u32) -> Result<(), SurfaceError> {
+    with_compositor(|compositor| {
+        let next_z = compositor
+            .surfaces
+            .iter()
+            .map(|surface| surface.z)
+            .max()
+            .unwrap_or(0)
+            .saturating_add(1);
+        let surface = owned_surface_mut(compositor, owner_pid, id)?;
+        surface.z = next_z;
+        let bounds = surface.bounds;
+        compositor.surfaces.sort_by_key(|surface| surface.z);
+        compositor.focused_surface = Some(id);
+        compositor.redraw(bounds);
+        Ok(())
+    })
+}
+
+pub fn destroy_surface(owner_pid: u32, id: u32) -> Result<(), SurfaceError> {
+    with_compositor(|compositor| {
+        let index = compositor
+            .surfaces
+            .iter()
+            .position(|surface| surface.id == id)
+            .ok_or(SurfaceError::NotFound)?;
+        if compositor.surfaces[index].owner_pid != owner_pid {
+            return Err(SurfaceError::PermissionDenied);
+        }
+        let bounds = compositor.surfaces.remove(index).bounds;
+        if compositor.focused_surface == Some(id) {
+            compositor.focused_surface = None;
+        }
+        compositor.redraw(bounds);
+        Ok(())
+    })
+}
+
+pub fn damage_surface(
+    owner_pid: u32,
+    id: u32,
+    x: usize,
+    y: usize,
+    width: usize,
+    height: usize,
+) -> Result<u64, SurfaceError> {
+    with_compositor(|compositor| {
+        if width == 0 || height == 0 {
+            return Err(SurfaceError::InvalidGeometry);
+        }
+        let surface = owned_surface_mut(compositor, owner_pid, id)?;
+        let local = Rect {
+            x,
+            y,
+            width,
+            height,
+        }
+        .clipped(surface.bounds.width, surface.bounds.height);
+        if local.width == 0 || local.height == 0 {
+            return Err(SurfaceError::InvalidGeometry);
+        }
+        let damage = Rect {
+            x: surface.bounds.x.saturating_add(local.x),
+            y: surface.bounds.y.saturating_add(local.y),
+            width: local.width,
+            height: local.height,
+        };
+        compositor.redraw(damage);
+        Ok(compositor.frames)
+    })
+}
+
+pub fn fence_completed(fence: u64) -> bool {
+    COMPOSITOR
+        .lock()
+        .as_ref()
+        .is_some_and(|compositor| fence != 0 && compositor.frames >= fence)
+}
+
+pub fn destroy_owned_surfaces(owner_pid: u32) -> usize {
+    let mut state = COMPOSITOR.lock();
+    let Some(compositor) = state.as_mut() else {
+        return 0;
+    };
+    let before = compositor.surfaces.len();
+    compositor
+        .surfaces
+        .retain(|surface| surface.owner_pid != owner_pid);
+    let removed = before.saturating_sub(compositor.surfaces.len());
+    if removed > 0 {
+        if compositor
+            .focused_surface
+            .is_some_and(|id| !compositor.surfaces.iter().any(|surface| surface.id == id))
+        {
+            compositor.focused_surface = None;
+        }
+        compositor.redraw(Rect::full_screen(compositor.width, compositor.height));
+    }
+    removed
+}
+
+fn with_compositor<T>(
+    operation: impl FnOnce(&mut Compositor) -> Result<T, SurfaceError>,
+) -> Result<T, SurfaceError> {
+    let mut state = COMPOSITOR.lock();
+    let compositor = state.as_mut().ok_or(SurfaceError::Unavailable)?;
+    compositor.protocol_requests = compositor.protocol_requests.saturating_add(1);
+    let result = operation(compositor);
+    if result.is_err() {
+        compositor.rejected_requests = compositor.rejected_requests.saturating_add(1);
+    }
+    result
+}
+
+fn owned_surface_mut(
+    compositor: &mut Compositor,
+    owner_pid: u32,
+    id: u32,
+) -> Result<&mut Surface, SurfaceError> {
+    let surface = compositor
+        .surfaces
+        .iter_mut()
+        .find(|surface| surface.id == id)
+        .ok_or(SurfaceError::NotFound)?;
+    if surface.owner_pid != owner_pid {
+        return Err(SurfaceError::PermissionDenied);
+    }
+    Ok(surface)
 }
 
 impl Compositor {
@@ -187,7 +447,15 @@ impl Compositor {
             .saturating_add((damage.width * damage.height) as u64);
         self.frames = self.frames.saturating_add(1);
         self.checksum = checksum(&self.backbuffer);
-        display::present(&self.backbuffer);
+        display::present_damage(
+            &self.backbuffer,
+            display::DamageRect {
+                x: damage.x,
+                y: damage.y,
+                width: damage.width,
+                height: damage.height,
+            },
+        );
     }
 }
 
@@ -246,6 +514,12 @@ pub fn write_to_buffer(out: &mut [u8]) -> usize {
     writer.dec(compositor.cursor_y as u64);
     writer.text(" checksum=0x");
     writer.hex(u64::from(compositor.checksum), 8);
+    writer.text(" focus=");
+    writer.dec(u64::from(compositor.focused_surface.unwrap_or(0)));
+    writer.text(" requests=");
+    writer.dec(compositor.protocol_requests);
+    writer.text(" rejected=");
+    writer.dec(compositor.rejected_requests);
     writer.byte(b'\n');
     writer.len
 }
@@ -307,6 +581,31 @@ mod tests {
         .clipped(320, 200);
         assert_eq!(clipped.width, 10);
         assert_eq!(clipped.height, 10);
+    }
+
+    #[test_case]
+    fn unions_old_and_new_surface_bounds() {
+        let union = Rect {
+            x: 10,
+            y: 20,
+            width: 30,
+            height: 40,
+        }
+        .union(Rect {
+            x: 25,
+            y: 10,
+            width: 40,
+            height: 20,
+        });
+        assert_eq!(
+            union,
+            Rect {
+                x: 10,
+                y: 10,
+                width: 55,
+                height: 50,
+            }
+        );
     }
 
     #[test_case]

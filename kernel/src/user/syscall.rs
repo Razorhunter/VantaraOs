@@ -1,11 +1,15 @@
 use core::arch::global_asm;
 use core::slice;
 use core::str;
-use core::sync::atomic::{AtomicU64, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 use crate::sync::PreemptMutex as Mutex;
 
 pub const SYSCALL_INTERRUPT: u8 = 0x80;
+
+// The physical text console belongs to the interactive user session. Kernel
+// diagnostics and userland stderr stay on the serial debug console.
+static USER_CONSOLE_STARTED: AtomicBool = AtomicBool::new(false);
 
 pub const SYS_EXIT: u64 = 1;
 pub const SYS_WRITE: u64 = 2;
@@ -72,9 +76,16 @@ pub const SYS_TCP_CONNECT: u64 = 61;
 pub const SYS_TCP_SEND: u64 = 62;
 pub const SYS_TCP_RECV: u64 = 63;
 pub const SYS_TCP_CLOSE: u64 = 64;
+pub const SYS_SURFACE_CREATE: u64 = 65;
+pub const SYS_SURFACE_CONFIGURE: u64 = 66;
+pub const SYS_SURFACE_SET_COLOR: u64 = 67;
+pub const SYS_SURFACE_FOCUS: u64 = 68;
+pub const SYS_SURFACE_DESTROY: u64 = 69;
+pub const SYS_SURFACE_DAMAGE: u64 = 70;
+pub const SYS_FRAME_FENCE_STATUS: u64 = 71;
 
 pub const ABI_VERSION_MAJOR: u64 = 1;
-pub const ABI_VERSION_MINOR: u64 = 14;
+pub const ABI_VERSION_MINOR: u64 = 16;
 pub const ABI_VERSION: u64 = (ABI_VERSION_MAJOR << 32) | ABI_VERSION_MINOR;
 
 pub const SYSCALL_RETURN_TO_KERNEL: u64 = u64::MAX;
@@ -650,6 +661,16 @@ pub extern "C" fn syscall_interrupt_dispatch(frame: &SyscallFrame) -> u64 {
 
     if frame.number == SYS_EXIT {
         let pid = crate::user::process::mark_current_user_exited(frame.arg0);
+        if let Some(pid) = pid {
+            let removed = crate::drivers::compositor::destroy_owned_surfaces(pid);
+            if removed > 0 {
+                crate::serial_println!(
+                    "[COMPOSITOR] released {} surface(s) owned by pid={}",
+                    removed,
+                    pid
+                );
+            }
+        }
         crate::serial_println!(
             "[SYSCALL] SYS_EXIT status={} pid={:?}; user task checked out",
             frame.arg0,
@@ -780,9 +801,6 @@ pub extern "C" fn user_exit_landing() -> ! {
     maintain_process_table();
     if let Some(resume) = schedule_ready_user() {
         resume_scheduled_user(resume, resume.resume_context.rax);
-    }
-    if !crate::user::program::has_pending() {
-        crate::shell::init();
     }
     crate::runtime::run_event_loop();
 }
@@ -996,12 +1014,120 @@ pub fn dispatch(frame: SyscallFrame) -> Result<u64, SyscallError> {
         SYS_TCP_SEND => tcp_send_user(frame.arg0, frame.arg1, frame.arg2),
         SYS_TCP_RECV => tcp_recv_user(frame.arg0, frame.arg1, frame.arg2),
         SYS_TCP_CLOSE => tcp_close_user(frame.arg0),
+        SYS_SURFACE_CREATE => {
+            create_surface_user(frame.arg0, frame.arg1, frame.arg2, frame.arg3, frame.arg4)
+        }
+        SYS_SURFACE_CONFIGURE => {
+            configure_surface_user(frame.arg0, frame.arg1, frame.arg2, frame.arg3, frame.arg4)
+        }
+        SYS_SURFACE_SET_COLOR => set_surface_color_user(frame.arg0, frame.arg1),
+        SYS_SURFACE_FOCUS => focus_surface_user(frame.arg0),
+        SYS_SURFACE_DESTROY => destroy_surface_user(frame.arg0),
+        SYS_SURFACE_DAMAGE => {
+            damage_surface_user(frame.arg0, frame.arg1, frame.arg2, frame.arg3, frame.arg4)
+        }
+        SYS_FRAME_FENCE_STATUS => {
+            Ok(crate::drivers::compositor::fence_completed(frame.arg0) as u64)
+        }
         SYS_SLEEP_MS => Err(SyscallError::NotImplemented),
         SYS_YIELD => Err(SyscallError::NotImplemented),
         SYS_EXIT => Err(SyscallError::NotImplemented),
         SYS_WRITE => write_user_buffer(frame.arg0, frame.arg1, frame.arg2),
         _ => Err(SyscallError::UnknownSyscall),
     }
+}
+
+fn current_surface_owner() -> Result<crate::user::process::Pid, SyscallError> {
+    crate::user::process::current_user_pid().ok_or(SyscallError::InvalidArgument)
+}
+
+fn map_surface_error(error: crate::drivers::compositor::SurfaceError) -> SyscallError {
+    use crate::drivers::compositor::SurfaceError;
+    match error {
+        SurfaceError::PermissionDenied => SyscallError::PermissionDenied,
+        SurfaceError::LimitReached => SyscallError::WouldBlock,
+        SurfaceError::Unavailable | SurfaceError::InvalidGeometry | SurfaceError::NotFound => {
+            SyscallError::InvalidArgument
+        }
+    }
+}
+
+fn create_surface_user(
+    x: u64,
+    y: u64,
+    width: u64,
+    height: u64,
+    color: u64,
+) -> Result<u64, SyscallError> {
+    let owner = current_surface_owner()?;
+    let x = usize::try_from(x).map_err(|_| SyscallError::InvalidArgument)?;
+    let y = usize::try_from(y).map_err(|_| SyscallError::InvalidArgument)?;
+    let width = usize::try_from(width).map_err(|_| SyscallError::InvalidArgument)?;
+    let height = usize::try_from(height).map_err(|_| SyscallError::InvalidArgument)?;
+    let color = u8::try_from(color).map_err(|_| SyscallError::InvalidArgument)?;
+    crate::drivers::compositor::create_surface(owner, x, y, width, height, color)
+        .map(u64::from)
+        .map_err(map_surface_error)
+}
+
+fn configure_surface_user(
+    id: u64,
+    x: u64,
+    y: u64,
+    width: u64,
+    height: u64,
+) -> Result<u64, SyscallError> {
+    let owner = current_surface_owner()?;
+    let id = u32::try_from(id).map_err(|_| SyscallError::InvalidArgument)?;
+    let x = usize::try_from(x).map_err(|_| SyscallError::InvalidArgument)?;
+    let y = usize::try_from(y).map_err(|_| SyscallError::InvalidArgument)?;
+    let width = usize::try_from(width).map_err(|_| SyscallError::InvalidArgument)?;
+    let height = usize::try_from(height).map_err(|_| SyscallError::InvalidArgument)?;
+    crate::drivers::compositor::configure_surface(owner, id, x, y, width, height)
+        .map(|()| 0)
+        .map_err(map_surface_error)
+}
+
+fn set_surface_color_user(id: u64, color: u64) -> Result<u64, SyscallError> {
+    let owner = current_surface_owner()?;
+    let id = u32::try_from(id).map_err(|_| SyscallError::InvalidArgument)?;
+    let color = u8::try_from(color).map_err(|_| SyscallError::InvalidArgument)?;
+    crate::drivers::compositor::set_surface_color(owner, id, color)
+        .map(|()| 0)
+        .map_err(map_surface_error)
+}
+
+fn focus_surface_user(id: u64) -> Result<u64, SyscallError> {
+    let owner = current_surface_owner()?;
+    let id = u32::try_from(id).map_err(|_| SyscallError::InvalidArgument)?;
+    crate::drivers::compositor::focus_surface(owner, id)
+        .map(|()| 0)
+        .map_err(map_surface_error)
+}
+
+fn destroy_surface_user(id: u64) -> Result<u64, SyscallError> {
+    let owner = current_surface_owner()?;
+    let id = u32::try_from(id).map_err(|_| SyscallError::InvalidArgument)?;
+    crate::drivers::compositor::destroy_surface(owner, id)
+        .map(|()| 0)
+        .map_err(map_surface_error)
+}
+
+fn damage_surface_user(
+    id: u64,
+    x: u64,
+    y: u64,
+    width: u64,
+    height: u64,
+) -> Result<u64, SyscallError> {
+    let owner = current_surface_owner()?;
+    let id = u32::try_from(id).map_err(|_| SyscallError::InvalidArgument)?;
+    let x = usize::try_from(x).map_err(|_| SyscallError::InvalidArgument)?;
+    let y = usize::try_from(y).map_err(|_| SyscallError::InvalidArgument)?;
+    let width = usize::try_from(width).map_err(|_| SyscallError::InvalidArgument)?;
+    let height = usize::try_from(height).map_err(|_| SyscallError::InvalidArgument)?;
+    crate::drivers::compositor::damage_surface(owner, id, x, y, width, height)
+        .map_err(map_surface_error)
 }
 
 fn spawn_user_thread(entry: u64, arg: u64) -> Result<u64, SyscallError> {
@@ -1159,20 +1285,33 @@ fn write_user_buffer(fd: u64, ptr: u64, len: u64) -> Result<u64, SyscallError> {
         return write_descriptor(fd, bytes).map(|written| written as u64);
     }
 
+    let stdout = fd == 1;
+    if stdout && !USER_CONSOLE_STARTED.swap(true, Ordering::AcqRel) {
+        crate::vga_buffer::clear_screen();
+    }
+
     match str::from_utf8(bytes) {
         Ok(text) => {
             crate::serial_print!("{}", text);
-            crate::print!("{}", text);
+            if stdout {
+                crate::print!("{}", text);
+            }
         }
         Err(_) => {
             crate::serial_print!("[USER bytes]");
-            crate::print!("[USER bytes]");
+            if stdout {
+                crate::print!("[USER bytes]");
+            }
             for &byte in bytes {
                 crate::serial_print!(" {:02x}", byte);
-                crate::print!(" {:02x}", byte);
+                if stdout {
+                    crate::print!(" {:02x}", byte);
+                }
             }
             crate::serial_println!();
-            crate::println!();
+            if stdout {
+                crate::println!();
+            }
         }
     }
 

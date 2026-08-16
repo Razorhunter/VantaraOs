@@ -3,8 +3,8 @@ use alloc::vec::Vec;
 
 use crate::sync::PreemptMutex as Mutex;
 
-use super::framebuffer;
 pub use super::framebuffer::PixelFormat;
+use super::{framebuffer, virtio_gpu};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DisplayBackend {
@@ -22,6 +22,14 @@ pub struct DisplayMode {
     pub bits_per_pixel: u8,
     pub refresh_millihertz: u32,
     pub pixel_format: PixelFormat,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DamageRect {
+    pub x: usize,
+    pub y: usize,
+    pub width: usize,
+    pub height: usize,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -59,6 +67,40 @@ static DISPLAY: Mutex<DisplayInfo> = Mutex::new(DisplayInfo {
 });
 
 pub fn init() {
+    let virtio = virtio_gpu::info();
+    if virtio.scanout_configured {
+        let mode = DisplayMode {
+            width: virtio.primary_width as usize,
+            height: virtio.primary_height as usize,
+            stride: virtio.primary_width as usize * 4,
+            bits_per_pixel: 32,
+            refresh_millihertz: 60_000,
+            pixel_format: PixelFormat::Xrgb8888,
+        };
+        *DISPLAY.lock() = DisplayInfo {
+            ready: true,
+            backend: DisplayBackend::VirtioGpu,
+            mode,
+            allocated_buffers: 0,
+            page_flips: 0,
+            rejected_flips: 0,
+            last_checksum: 0,
+            output_count: 1,
+            edid_available: false,
+        };
+        crate::drivers::status::report(
+            "display",
+            crate::drivers::status::DriverState::Ready,
+            "generic display API with VirtIO-GPU backend",
+        );
+        crate::serial_println!(
+            "[DISPLAY] backend=VirtioGpu mode={}x{} stride={} bpp=32 refresh-millihertz=60000 outputs=1 output=virtio-primary edid=unavailable",
+            mode.width,
+            mode.height,
+            mode.stride
+        );
+        return;
+    }
     let framebuffer = framebuffer::info();
     if !framebuffer.ready {
         crate::drivers::status::report(
@@ -127,22 +169,66 @@ pub fn create_scanout_buffer() -> Option<Vec<u8>> {
 }
 
 pub fn present(buffer: &[u8]) -> bool {
-    let expected = {
+    let mode = info().mode;
+    present_damage(
+        buffer,
+        DamageRect {
+            x: 0,
+            y: 0,
+            width: mode.width,
+            height: mode.height,
+        },
+    )
+}
+
+pub fn present_damage(buffer: &[u8], damage: DamageRect) -> bool {
+    let (expected, backend, mode) = {
         let display = DISPLAY.lock();
         if !display.ready {
             return false;
         }
-        display.mode.stride.saturating_mul(display.mode.height)
+        (
+            display.mode.stride.saturating_mul(display.mode.height),
+            display.backend,
+            display.mode,
+        )
     };
-    if buffer.len() != expected || !framebuffer::present(buffer) {
+    if buffer.len() != expected
+        || damage.width == 0
+        || damage.height == 0
+        || damage.x.saturating_add(damage.width) > mode.width
+        || damage.y.saturating_add(damage.height) > mode.height
+    {
         let mut display = DISPLAY.lock();
         display.rejected_flips = display.rejected_flips.saturating_add(1);
         return false;
     }
-    let checksum = buffer.iter().fold(0u32, |sum, byte| {
-        sum.rotate_left(5).wrapping_add(u32::from(*byte))
-    });
+    let presented = match backend {
+        DisplayBackend::VirtioGpu => virtio_gpu::present_region(
+            buffer,
+            damage.x,
+            damage.y,
+            damage.width,
+            damage.height,
+            mode.stride,
+        ),
+        _ => framebuffer::present(buffer),
+    };
+    if !presented {
+        let mut display = DISPLAY.lock();
+        display.rejected_flips = display.rejected_flips.saturating_add(1);
+        return false;
+    }
     let mut display = DISPLAY.lock();
+    let bytes_per_pixel = usize::from(mode.bits_per_pixel / 8);
+    let row_start = damage.x * bytes_per_pixel;
+    let row_bytes = damage.width * bytes_per_pixel;
+    let mut checksum = display.last_checksum.rotate_left(7);
+    for y in damage.y..damage.y + damage.height {
+        for byte in &buffer[y * mode.stride + row_start..y * mode.stride + row_start + row_bytes] {
+            checksum = checksum.rotate_left(5).wrapping_add(u32::from(*byte));
+        }
+    }
     display.page_flips = display.page_flips.saturating_add(1);
     display.last_checksum = checksum;
     true
@@ -182,7 +268,10 @@ pub fn write_to_buffer(out: &mut [u8]) -> usize {
     writer.text(if display.output_count == 0 {
         "none"
     } else {
-        "firmware-primary"
+        match display.backend {
+            DisplayBackend::VirtioGpu => "virtio-primary",
+            _ => "firmware-primary",
+        }
     });
     writer.text(" edid=");
     writer.text(if display.edid_available {

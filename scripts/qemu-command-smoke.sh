@@ -7,7 +7,7 @@ GOLDEN_DIR="${ROOT_DIR}/scripts/golden"
 QEMU_BIN="${QEMU:-qemu-system-x86_64}"
 CASE="${1:-all}"
 
-CASES=(ls cat procs rusthello threaddemo pipedemo eventdemo msgdemo jobdemo udpdemo tcpdemo)
+CASES=(ls cat procs rusthello threaddemo pipedemo eventdemo msgdemo jobdemo udpdemo tcpdemo windowdemo)
 
 if ! command -v "${QEMU_BIN}" >/dev/null 2>&1; then
   echo "command smoke test skipped: ${QEMU_BIN} not found" >&2
@@ -31,6 +31,7 @@ case_command() {
     jobdemo) echo "jobdemo" ;;
     udpdemo) echo "udpdemo" ;;
     tcpdemo) echo "tcpdemo" ;;
+    windowdemo) echo "windowdemo" ;;
     *)
       echo "unknown command smoke case: $1" >&2
       return 2
@@ -129,7 +130,9 @@ run_case() (
   local golden_file="${GOLDEN_DIR}/${name}.golden"
   local qemu_pid=""
   local command_start
+  local command_attempts=300
   local -a network_args=()
+  local -a display_args=()
 
   if [[ "${name}" == "udpdemo" || "${name}" == "tcpdemo" ]]; then
     network_args=(
@@ -138,6 +141,10 @@ run_case() (
       -netdev "hubport,id=net1,hubid=0"
       -device "e1000,netdev=net1,mac=52:54:00:12:34:57"
     )
+  fi
+  if [[ "${name}" == "windowdemo" ]]; then
+    display_args=(-vga none -device virtio-vga)
+    command_attempts=900
   fi
 
   command="$(case_command "${name}")"
@@ -159,6 +166,7 @@ run_case() (
   "${QEMU_BIN}" \
     -drive "format=raw,file=${BOOTIMAGE}" \
     "${network_args[@]}" \
+    "${display_args[@]}" \
     -display none \
     -serial "file:${log_file}" \
     -monitor stdio \
@@ -167,14 +175,14 @@ run_case() (
     <"${monitor_fifo}" >"${monitor_log}" 2>&1 &
   qemu_pid=$!
 
-  wait_for_log "${log_file}" "${qemu_pid}" "login: "
+  wait_for_log "${log_file}" "${qemu_pid}" "login: " 0 "${command_attempts}"
   send_text "root"
-  wait_for_log "${log_file}" "${qemu_pid}" "Welcome to Vantara OS, root"
-  wait_for_log "${log_file}" "${qemu_pid}" 'root:/$ '
+  wait_for_log "${log_file}" "${qemu_pid}" "Welcome to Vantara OS, root" 0 "${command_attempts}"
+  wait_for_log "${log_file}" "${qemu_pid}" 'root:/$ ' 0 "${command_attempts}"
 
   command_start="$(wc -c <"${log_file}")"
   send_text "${command}"
-  wait_for_log "${log_file}" "${qemu_pid}" 'root:/$ ' "${command_start}"
+  wait_for_log "${log_file}" "${qemu_pid}" 'root:/$ ' "${command_start}" "${command_attempts}"
 
   tail -c "+$((command_start + 1))" "${log_file}" >"${output_file}"
 

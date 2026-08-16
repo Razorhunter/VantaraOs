@@ -67,12 +67,26 @@ wait_for_log "queue_size=64"
 wait_for_log "queue_enabled=true"
 wait_for_log "driver_ok=true"
 wait_for_log "init=Ok(())"
-wait_for_log "[init-display] virtio-gpu detected=true transport-ready=true capabilities=5 common=true notify=true isr=true device-config=true version1=true features-ok=true queue-size=64 queue-enabled=true driver-ok=true"
+wait_for_log "commands=6/6"
+wait_for_log "response=0x1100"
+wait_for_log "scanouts=1"
+wait_for_log "primary=1280x800"
+wait_for_log "enabled=true"
+wait_for_log "resource=true"
+wait_for_log "backing=true"
+wait_for_log "transfer=true"
+wait_for_log "flush=true"
+wait_for_log "scanout=true"
+wait_for_log "bytes=4096000"
+wait_for_log "[DISPLAY] backend=VirtioGpu mode=1280x800 stride=5120 bpp=32"
+wait_for_log "[COMPOSITOR] ready surfaces=2 frames=1 damaged=1024000"
+wait_for_log "[init-display] display0 ready=1 backend=virtio-gpu mode=1280x800 stride=5120 bpp=32 buffers=1 flips=1 rejected=0"
+wait_for_log "[init-display] virtio-gpu detected=true transport-ready=true capabilities=5 common=true notify=true isr=true device-config=true version1=true features-ok=true queue-size=64 queue-enabled=true driver-ok=true commands=8/8 response=0x1100 scanouts=1 primary=1280x800 enabled=true resource=true backing=true transfer=true flush=true scanout=true bytes=4096000"
 
 if grep -Eiq "kernel panic|EXCEPTION:" "${LOG_FILE}"; then
   echo "VirtIO-GPU discovery test failed: kernel panic detected" >&2
   exit 1
 fi
 
-echo "VirtIO-GPU discovery test passed: modern PCI transport capabilities found"
+echo "VirtIO-GPU 2D scanout test passed: resource, backing, transfer and flush completed"
 echo "serial log: ${LOG_FILE}"
